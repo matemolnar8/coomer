@@ -2,6 +2,8 @@
 
 macOS agent: frozen full-screen capture of the display under the cursor, with zoom, bounded pan while zoomed, and a toggleable flashlight overlay. Intended to show up in screen shares because it draws its own fullscreen window instead of using Accessibility zoom.
 
+Inspired by [boomer](https://github.com/tsoding/boomer), the Linux zoomer by Tsoding.
+
 ## Controls
 
 
