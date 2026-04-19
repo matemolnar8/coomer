@@ -16,7 +16,10 @@ fn ns_point_in_rect(p: NSPoint, r: NSRect) -> bool {
         && p.y <= r.origin.y + r.size.height
 }
 
-fn screen_for_mouse(mtm: MainThreadMarker, mouse: NSPoint) -> Option<objc2::rc::Retained<NSScreen>> {
+fn screen_for_mouse(
+    mtm: MainThreadMarker,
+    mouse: NSPoint,
+) -> Option<objc2::rc::Retained<NSScreen>> {
     let screens = NSScreen::screens(mtm);
     let n = screens.count();
     for i in 0..n {
@@ -29,6 +32,19 @@ fn screen_for_mouse(mtm: MainThreadMarker, mouse: NSPoint) -> Option<objc2::rc::
     Some(screens.objectAtIndex(0))
 }
 
+fn display_for_mouse(mouse: NSPoint) -> Option<CGDisplay> {
+    let point = CGPoint {
+        x: mouse.x,
+        y: mouse.y,
+    };
+    let (display_ids, count) = CGDisplay::displays_with_point(point, 16).ok()?;
+    display_ids
+        .into_iter()
+        .take(count as usize)
+        .find(|id| *id != 0)
+        .map(CGDisplay::new)
+}
+
 fn display_id_for_screen(screen: &NSScreen) -> Option<u32> {
     let dict = screen.deviceDescription();
     let key = NSString::from_str("NSScreenNumber");
@@ -37,21 +53,38 @@ fn display_id_for_screen(screen: &NSScreen) -> Option<u32> {
     Some(n.as_u32())
 }
 
+fn screen_for_display_id(
+    mtm: MainThreadMarker,
+    display_id: u32,
+) -> Option<objc2::rc::Retained<NSScreen>> {
+    let screens = NSScreen::screens(mtm);
+    let n = screens.count();
+    for i in 0..n {
+        let screen = screens.objectAtIndex(i);
+        if display_id_for_screen(&screen) == Some(display_id) {
+            return Some(screen);
+        }
+    }
+    None
+}
+
 pub fn capture_under_cursor(mtm: MainThreadMarker) -> Result<CapturedDisplay, String> {
     let mouse = NSEvent::mouseLocation();
-    let screen = screen_for_mouse(mtm, mouse).ok_or("no NSScreen")?;
-    let did = display_id_for_screen(&screen).ok_or("no display id in NSScreen deviceDescription")?;
-
-    let cg_point = CGPoint {
-        x: mouse.x,
-        y: mouse.y,
+    let display = if let Some(display) = display_for_mouse(mouse) {
+        display
+    } else {
+        let screen = screen_for_mouse(mtm, mouse).ok_or("no NSScreen")?;
+        let display_id =
+            display_id_for_screen(&screen).ok_or("no display id in NSScreen deviceDescription")?;
+        CGDisplay::new(display_id)
     };
-    let _ = CGDisplay::displays_with_point(cg_point, 16).ok();
+    let screen = screen_for_display_id(mtm, display.id)
+        .or_else(|| screen_for_mouse(mtm, mouse))
+        .ok_or("no NSScreen")?;
 
-    let d = CGDisplay::new(did);
-    let cg_image = d
-        .image()
-        .ok_or("CGDisplayCreateImage returned null (grant Screen Recording to coomer in System Settings)")?;
+    let cg_image = display.image().ok_or(
+        "CGDisplayCreateImage returned null (grant Screen Recording to coomer in System Settings)",
+    )?;
 
     let window_frame = screen.frame();
     Ok(CapturedDisplay {

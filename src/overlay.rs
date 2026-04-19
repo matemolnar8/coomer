@@ -319,7 +319,7 @@ fn ensure_animation_timer(view: Retained<CoomerView>) {
 
 pub fn spawn_window(
     mtm: MainThreadMarker,
-    screen: &NSScreen,
+    _screen: &NSScreen,
     window_frame: NSRect,
 ) -> Result<(Retained<CoomerWindow>, Retained<CoomerView>), String> {
     let this = CoomerWindow::alloc(mtm).set_ivars(());
@@ -330,12 +330,12 @@ pub fn spawn_window(
             styleMask: NSWindowStyleMask::Borderless,
             backing: NSBackingStoreType::Buffered,
             defer: false,
-            screen: Some(screen),
         ]
     };
     let window = window.ok_or("initWithContentRect failed for CoomerWindow")?;
 
     let w = window.as_super();
+    w.setFrame_display(window_frame, false);
     w.setLevel(NSScreenSaverWindowLevel);
     w.setOpaque(false);
     w.setBackgroundColor(Some(&NSColor::clearColor()));
