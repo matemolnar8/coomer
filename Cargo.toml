@@ -1,7 +1,7 @@
 [package]
 name = "coomer"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Frozen full-screen zoom overlay for macOS"
 
 [dependencies]
