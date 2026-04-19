@@ -1,7 +1,7 @@
 use core_graphics::image::CGImage;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, ClassType, MainThreadOnly};
+use objc2::{ClassType, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSEvent,
     NSEventModifierFlags, NSEventType, NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel,
@@ -21,7 +21,7 @@ const ZOOM_SCROLL_FACTOR_PRECISE: f64 = 0.004;
 const ZOOM_SCROLL_FACTOR_LINE: f64 = 0.07;
 const KEYBOARD_ZOOM_MULTIPLIER: f64 = 1.08;
 
-pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = 72.0;
+pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = 144.0;
 const MIN_FLASHLIGHT_RADIUS: f64 = 24.0;
 const MAX_FLASHLIGHT_RADIUS: f64 = 320.0;
 const FLASHLIGHT_SCROLL_FACTOR_PRECISE: f64 = 2.5;
@@ -69,11 +69,7 @@ pub fn with_session_mut<R>(f: impl FnOnce(&mut DrawState) -> R) -> Option<R> {
 }
 
 fn flashlight_target_progress(st: &DrawState) -> f64 {
-    if st.flashlight_enabled {
-        1.0
-    } else {
-        0.0
-    }
+    if st.flashlight_enabled { 1.0 } else { 0.0 }
 }
 
 fn ease_in_out(t: f64) -> f64 {
