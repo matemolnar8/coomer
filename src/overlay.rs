@@ -13,13 +13,33 @@ use std::cell::RefCell;
 
 use crate::render;
 
-pub const ZOOM_LEVELS: [f64; 7] = [1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0];
+pub const DEFAULT_ZOOM: f64 = 1.0;
+const MIN_ZOOM: f64 = 1.0;
+const MAX_ZOOM: f64 = 4.0;
+const ZOOM_SCROLL_FACTOR_PRECISE: f64 = 0.004;
+const ZOOM_SCROLL_FACTOR_LINE: f64 = 0.07;
+const KEYBOARD_ZOOM_MULTIPLIER: f64 = 1.08;
+
+pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = 72.0;
+const MIN_FLASHLIGHT_RADIUS: f64 = 24.0;
+const MAX_FLASHLIGHT_RADIUS: f64 = 320.0;
+const FLASHLIGHT_SCROLL_FACTOR_PRECISE: f64 = 2.5;
+const FLASHLIGHT_SCROLL_FACTOR_LINE: f64 = 12.0;
+const KEY_F: u16 = 3;
+const KEY_Q: u16 = 12;
+const KEY_EQUALS: u16 = 24;
+const KEY_MINUS: u16 = 27;
+const KEY_0: u16 = 29;
+const KEY_ESCAPE: u16 = 53;
 
 pub struct DrawState {
     pub image: CGImage,
-    pub zoom_index: usize,
-    pub center_view: NSPoint,
-    pub command_down: bool,
+    pub zoom: f64,
+    pub pointer_view: NSPoint,
+    pub image_origin: NSPoint,
+    pub drag_anchor_view: Option<NSPoint>,
+    pub flashlight_enabled: bool,
+    pub flashlight_radius: f64,
 }
 
 thread_local! {
@@ -40,6 +60,96 @@ pub fn clear_session() {
 
 pub fn with_session_mut<R>(f: impl FnOnce(&mut DrawState) -> R) -> Option<R> {
     SESSION.with(|c| c.borrow_mut().as_mut().map(f))
+}
+
+fn reset_state(st: &mut DrawState) {
+    st.zoom = DEFAULT_ZOOM;
+    st.pointer_view = NSPoint { x: 0.0, y: 0.0 };
+    st.image_origin = NSPoint { x: 0.0, y: 0.0 };
+    st.drag_anchor_view = None;
+    st.flashlight_enabled = false;
+    st.flashlight_radius = DEFAULT_FLASHLIGHT_RADIUS;
+}
+
+const Z_EPS: f64 = 1e-9;
+
+fn clamp_image_origin(origin: NSPoint, bounds: NSRect, zoom: f64) -> NSPoint {
+    let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    if z <= 1.0 + Z_EPS {
+        return NSPoint { x: 0.0, y: 0.0 };
+    }
+    let w = bounds.size.width;
+    let h = bounds.size.height;
+    let sw = w * z;
+    let sh = h * z;
+    let min_ox = w - sw;
+    let min_oy = h - sh;
+    NSPoint {
+        x: origin.x.clamp(min_ox, 0.0),
+        y: origin.y.clamp(min_oy, 0.0),
+    }
+}
+
+fn anchor_zoom_to_cursor(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, new_zoom: f64) {
+    let new_zoom = new_zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    if new_zoom <= 1.0 + Z_EPS {
+        st.zoom = MIN_ZOOM;
+        st.image_origin = NSPoint { x: 0.0, y: 0.0 };
+        return;
+    }
+    let z0 = st.zoom;
+    if z0 <= 1.0 + Z_EPS {
+        st.image_origin = NSPoint {
+            x: px * (1.0 - new_zoom),
+            y: py * (1.0 - new_zoom),
+        };
+        st.zoom = new_zoom;
+        st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+        return;
+    }
+    let ratio = new_zoom / z0;
+    st.image_origin = NSPoint {
+        x: px - (px - st.image_origin.x) * ratio,
+        y: py - (py - st.image_origin.y) * ratio,
+    };
+    st.zoom = new_zoom;
+    st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+}
+
+fn zoom_keyboard_anchored(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, direction: i32) {
+    let factor = if direction > 0 {
+        KEYBOARD_ZOOM_MULTIPLIER
+    } else {
+        1.0 / KEYBOARD_ZOOM_MULTIPLIER
+    };
+    let new_zoom = (st.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    anchor_zoom_to_cursor(st, bounds, px, py, new_zoom);
+}
+
+fn event_point_in_view(ev: &NSEvent, view: &CoomerView) -> NSPoint {
+    view.as_super().convertPoint_fromView(ev.locationInWindow(), None)
+}
+
+fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
+    NSPoint {
+        x: to.x - from.x,
+        y: to.y - from.y,
+    }
+}
+
+fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
+    MONITOR.with(|c| {
+        if let Some(m) = c.borrow_mut().take() {
+            unsafe {
+                NSEvent::removeMonitor(&m);
+            }
+        }
+    });
+    NSCursor::unhide();
+    clear_session();
+    let app = NSApplication::sharedApplication(mtm);
+    window.as_super().orderOut(None);
+    app.stop(None);
 }
 
 define_class!(
@@ -72,34 +182,45 @@ define_class!(
     impl CoomerView {
         #[unsafe(method(isOpaque))]
         fn is_opaque(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
             true
         }
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
             SESSION.with(|c| {
-                let b = c.borrow();
-                let Some(st) = b.as_ref() else {
+                let mut b = c.borrow_mut();
+                let Some(st) = b.as_mut() else {
                     return;
                 };
+                let bounds = self.bounds();
+                st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
                     return;
                 };
                 let cg_ctx = ns_ctx.CGContext();
-                let bounds = self.bounds();
-                let zi = st.zoom_index.min(ZOOM_LEVELS.len() - 1);
-                let zoom = ZOOM_LEVELS[zi];
-                let center = CGPoint {
-                    x: st.center_view.x as _,
-                    y: st.center_view.y as _,
+                let zoom = st.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+                let pointer = CGPoint {
+                    x: st.pointer_view.x as _,
+                    y: st.pointer_view.y as _,
+                };
+                let image_origin = CGPoint {
+                    x: st.image_origin.x as _,
+                    y: st.image_origin.y as _,
                 };
                 render::draw_session(
                     &cg_ctx,
                     bounds,
                     &st.image,
                     zoom,
-                    center,
-                    st.command_down,
+                    pointer,
+                    image_origin,
+                    st.flashlight_enabled,
+                    st.flashlight_radius,
                 );
             });
         }
@@ -132,8 +253,8 @@ pub fn spawn_window(
 
     let w = window.as_super();
     w.setLevel(NSScreenSaverWindowLevel);
-    w.setOpaque(true);
-    w.setBackgroundColor(Some(&NSColor::blackColor()));
+    w.setOpaque(false);
+    w.setBackgroundColor(Some(&NSColor::clearColor()));
     w.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
@@ -156,6 +277,7 @@ pub fn spawn_window(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     w.setContentView(Some(v));
+    w.makeFirstResponder(Some(v));
     Ok((window, view))
 }
 
@@ -169,58 +291,140 @@ pub fn install_local_monitor(
     let block = block2::RcBlock::new(move |event: core::ptr::NonNull<NSEvent>| -> *mut NSEvent {
         let ev = unsafe { event.as_ref() };
         let ty = ev.r#type();
-        if ty == NSEventType::LeftMouseDown
-            || ty == NSEventType::RightMouseDown
-            || ty == NSEventType::OtherMouseDown
-        {
-            MONITOR.with(|c| {
-                if let Some(m) = c.borrow_mut().take() {
-                    unsafe {
-                        NSEvent::removeMonitor(&m);
-                    }
+
+        if ty == NSEventType::KeyDown {
+            match ev.keyCode() {
+                KEY_Q | KEY_ESCAPE => {
+                    stop_overlay(mtm_for, &window);
+                    return core::ptr::null_mut();
                 }
-            });
-            NSCursor::unhide();
-            clear_session();
-            let app = NSApplication::sharedApplication(mtm_for);
-            window.as_super().orderOut(None);
-            app.stop(None);
-            return event.as_ptr();
+                KEY_F => {
+                    with_session_mut(|st| {
+                        st.flashlight_enabled = !st.flashlight_enabled;
+                    });
+                    view.setNeedsDisplay(true);
+                    return core::ptr::null_mut();
+                }
+                KEY_0 => {
+                    let pointer = event_point_in_view(ev, &view);
+                    with_session_mut(|st| {
+                        reset_state(st);
+                        st.pointer_view = pointer;
+                    });
+                    view.setNeedsDisplay(true);
+                    return core::ptr::null_mut();
+                }
+                KEY_EQUALS => {
+                    let bounds = view.as_super().bounds();
+                    with_session_mut(|st| {
+                        let p = st.pointer_view;
+                        zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
+                    });
+                    view.setNeedsDisplay(true);
+                    return core::ptr::null_mut();
+                }
+                KEY_MINUS => {
+                    let bounds = view.as_super().bounds();
+                    with_session_mut(|st| {
+                        let p = st.pointer_view;
+                        zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
+                    });
+                    view.setNeedsDisplay(true);
+                    return core::ptr::null_mut();
+                }
+                _ => {}
+            }
+            return core::ptr::null_mut();
         }
+
+        if ty == NSEventType::KeyUp {
+            return core::ptr::null_mut();
+        }
+
         if ty == NSEventType::ScrollWheel {
             let dy = ev.scrollingDeltaY();
-            let step = if dy > 0.0 {
-                1i32
-            } else if dy < 0.0 {
-                -1
-            } else {
-                0
-            };
-            if step != 0 {
-                with_session_mut(|st| {
-                    let n = ZOOM_LEVELS.len();
-                    let zi = st.zoom_index as i32 + step;
-                    st.zoom_index = zi.clamp(0, (n - 1) as i32) as usize;
-                });
-                view.setNeedsDisplay(true);
+            if dy == 0.0 {
+                return event.as_ptr();
             }
-            return event.as_ptr();
-        }
-        if ty == NSEventType::FlagsChanged || ty == NSEventType::MouseMoved {
-            let flags = ev.modifierFlags();
-            let cmd = flags.contains(NSEventModifierFlags::Command);
+            let point = event_point_in_view(ev, &view);
+            let precise = ev.hasPreciseScrollingDeltas();
+            let bounds = view.as_super().bounds();
             with_session_mut(|st| {
-                st.command_down = cmd;
-            });
-            let mouse = NSEvent::mouseLocation();
-            let wp = window.as_super().convertPointFromScreen(mouse);
-            with_session_mut(|st| {
-                let vp = view.as_super().convertPoint_fromView(wp, None);
-                st.center_view = vp;
+                st.pointer_view = point;
+                let cmd = ev
+                    .modifierFlags()
+                    .contains(NSEventModifierFlags::Command);
+                if cmd && st.flashlight_enabled {
+                    let k = if precise {
+                        FLASHLIGHT_SCROLL_FACTOR_PRECISE
+                    } else {
+                        FLASHLIGHT_SCROLL_FACTOR_LINE
+                    };
+                    st.flashlight_radius = (st.flashlight_radius + dy * k)
+                        .clamp(MIN_FLASHLIGHT_RADIUS, MAX_FLASHLIGHT_RADIUS);
+                } else {
+                    let line_factor = 1.0 + dy * ZOOM_SCROLL_FACTOR_LINE;
+                    let factor = if precise {
+                        1.0 + dy * ZOOM_SCROLL_FACTOR_PRECISE
+                    } else {
+                        line_factor
+                    };
+                    let new_zoom = (st.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                    anchor_zoom_to_cursor(st, bounds, point.x, point.y, new_zoom);
+                }
             });
             view.setNeedsDisplay(true);
             return event.as_ptr();
         }
+
+        if ty == NSEventType::LeftMouseDown {
+            let point = event_point_in_view(ev, &view);
+            with_session_mut(|st| {
+                st.pointer_view = point;
+                st.drag_anchor_view = Some(point);
+            });
+            view.setNeedsDisplay(true);
+            return event.as_ptr();
+        }
+
+        if ty == NSEventType::LeftMouseDragged {
+            let point = event_point_in_view(ev, &view);
+            let bounds = view.as_super().bounds();
+            with_session_mut(|st| {
+                if let Some(anchor) = st.drag_anchor_view {
+                    if st.zoom > 1.0 + Z_EPS {
+                        let d = point_delta(anchor, point);
+                        st.image_origin.x += d.x;
+                        st.image_origin.y += d.y;
+                        st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+                    }
+                    st.drag_anchor_view = Some(point);
+                }
+                st.pointer_view = point;
+            });
+            view.setNeedsDisplay(true);
+            return event.as_ptr();
+        }
+
+        if ty == NSEventType::LeftMouseUp {
+            let point = event_point_in_view(ev, &view);
+            with_session_mut(|st| {
+                st.pointer_view = point;
+                st.drag_anchor_view = None;
+            });
+            view.setNeedsDisplay(true);
+            return event.as_ptr();
+        }
+
+        if ty == NSEventType::MouseMoved {
+            let point = event_point_in_view(ev, &view);
+            with_session_mut(|st| {
+                st.pointer_view = point;
+            });
+            view.setNeedsDisplay(true);
+            return event.as_ptr();
+        }
+
         event.as_ptr()
     });
 
@@ -232,8 +436,4 @@ pub fn install_local_monitor(
         *c.borrow_mut() = Some(monitor.clone());
     });
     monitor
-}
-
-pub fn hide_cursor() {
-    NSCursor::hide();
 }

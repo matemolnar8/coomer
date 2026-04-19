@@ -16,28 +16,31 @@ pub fn draw_session(
     view_bounds: NSRect,
     image: &SysCgImage,
     zoom: f64,
-    center: CGPoint,
-    show_ring: bool,
+    pointer: CGPoint,
+    image_origin: CGPoint,
+    flashlight_enabled: bool,
+    flashlight_radius: f64,
 ) {
     let bounds = nsrect_to_cgrect(view_bounds);
     let objc_img: &CGImage = unsafe { &*(ForeignType::as_ptr(image).cast::<CGImage>()) };
     let c = Some(cg_ctx);
-    CGContext::save_g_state(c);
-    CGContext::translate_ctm(c, center.x, center.y);
-    CGContext::scale_ctm(c, zoom as CGFloat, zoom as CGFloat);
-    CGContext::translate_ctm(c, -center.x, -center.y);
-    CGContext::draw_image(c, bounds, Some(objc_img));
-    CGContext::restore_g_state(c);
-    if show_ring {
-        let radius: CGFloat = 72.0;
-        let ring = CGRect::new(
-            CGPoint::new(center.x - radius, center.y - radius),
+    let scaled = CGRect::new(
+        CGPoint::new(image_origin.x as CGFloat, image_origin.y as CGFloat),
+        CGSize::new(bounds.size.width * zoom as CGFloat, bounds.size.height * zoom as CGFloat),
+    );
+    CGContext::draw_image(c, scaled, Some(objc_img));
+    if flashlight_enabled {
+        let radius = flashlight_radius as CGFloat;
+        let hole = CGRect::new(
+            CGPoint::new(pointer.x - radius, pointer.y - radius),
             CGSize::new(radius * 2.0, radius * 2.0),
         );
         CGContext::save_g_state(c);
-        CGContext::set_line_width(c, 4.0);
-        CGContext::set_rgb_stroke_color(c, 1.0, 0.85, 0.2, 1.0);
-        CGContext::stroke_ellipse_in_rect(c, ring);
+        CGContext::set_rgb_fill_color(c, 0.0, 0.0, 0.0, 0.65);
+        CGContext::begin_path(c);
+        CGContext::add_rect(c, bounds);
+        CGContext::add_ellipse_in_rect(c, hole);
+        CGContext::eo_fill_path(c);
         CGContext::restore_g_state(c);
     }
 }

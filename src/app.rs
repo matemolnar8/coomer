@@ -51,9 +51,12 @@ pub fn run() -> Result<(), String> {
 
     overlay::set_session(DrawState {
         image: cap.cg_image,
-        zoom_index: 0,
-        center_view: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
-        command_down: false,
+        zoom: overlay::DEFAULT_ZOOM,
+        pointer_view: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
+        image_origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
+        drag_anchor_view: None,
+        flashlight_enabled: false,
+        flashlight_radius: overlay::DEFAULT_FLASHLIGHT_RADIUS,
     });
 
     let app = NSApplication::sharedApplication(mtm);
@@ -65,14 +68,18 @@ pub fn run() -> Result<(), String> {
         let wp = window.as_super().convertPointFromScreen(mouse);
         let vp = view.as_super().convertPoint_fromView(wp, None);
         overlay::with_session_mut(|st| {
-            st.center_view = vp;
+            st.pointer_view = vp;
         });
     }
 
-    overlay::hide_cursor();
     let _monitor = overlay::install_local_monitor(mtm, view.clone(), window.clone());
 
+    #[allow(deprecated)]
+    {
+        app.activateIgnoringOtherApps(true);
+    }
     window.as_super().makeKeyAndOrderFront(None);
+    let _ = window.as_super().makeFirstResponder(Some(&*view));
     view.setNeedsDisplay(true);
 
     app.run();
