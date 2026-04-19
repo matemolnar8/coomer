@@ -18,7 +18,7 @@ pub fn draw_session(
     zoom: f64,
     pointer: CGPoint,
     image_origin: CGPoint,
-    flashlight_enabled: bool,
+    flashlight_progress: f64,
     flashlight_radius: f64,
 ) {
     let bounds = nsrect_to_cgrect(view_bounds);
@@ -26,17 +26,21 @@ pub fn draw_session(
     let c = Some(cg_ctx);
     let scaled = CGRect::new(
         CGPoint::new(image_origin.x as CGFloat, image_origin.y as CGFloat),
-        CGSize::new(bounds.size.width * zoom as CGFloat, bounds.size.height * zoom as CGFloat),
+        CGSize::new(
+            bounds.size.width * zoom as CGFloat,
+            bounds.size.height * zoom as CGFloat,
+        ),
     );
     CGContext::draw_image(c, scaled, Some(objc_img));
-    if flashlight_enabled {
-        let radius = flashlight_radius as CGFloat;
+    let progress = flashlight_progress.clamp(0.0, 1.0) as CGFloat;
+    if progress > 0.0 {
+        let radius = flashlight_radius as CGFloat * (0.9 + 0.1 * progress);
         let hole = CGRect::new(
             CGPoint::new(pointer.x - radius, pointer.y - radius),
             CGSize::new(radius * 2.0, radius * 2.0),
         );
         CGContext::save_g_state(c);
-        CGContext::set_rgb_fill_color(c, 0.0, 0.0, 0.0, 0.65);
+        CGContext::set_rgb_fill_color(c, 0.0, 0.0, 0.0, 0.65 * progress);
         CGContext::begin_path(c);
         CGContext::add_rect(c, bounds);
         CGContext::add_ellipse_in_rect(c, hole);

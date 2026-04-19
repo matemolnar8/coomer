@@ -56,7 +56,10 @@ pub fn run() -> Result<(), String> {
         image_origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
         drag_anchor_view: None,
         flashlight_enabled: false,
+        flashlight_progress: 0.0,
         flashlight_radius: overlay::DEFAULT_FLASHLIGHT_RADIUS,
+        flashlight_animation_from: 0.0,
+        flashlight_animation_started_at: None,
     });
 
     let app = NSApplication::sharedApplication(mtm);

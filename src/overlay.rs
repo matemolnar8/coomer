@@ -4,12 +4,13 @@ use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, ClassType, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSScreen, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSScreenSaverWindowLevel,
+    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel,
+    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGPoint;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSTimer};
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::render;
 
@@ -25,6 +26,8 @@ const MIN_FLASHLIGHT_RADIUS: f64 = 24.0;
 const MAX_FLASHLIGHT_RADIUS: f64 = 320.0;
 const FLASHLIGHT_SCROLL_FACTOR_PRECISE: f64 = 2.5;
 const FLASHLIGHT_SCROLL_FACTOR_LINE: f64 = 12.0;
+const FLASHLIGHT_TOGGLE_DURATION_SECS: f64 = 0.18;
+const FLASHLIGHT_TIMER_INTERVAL_SECS: f64 = 1.0 / 60.0;
 const KEY_F: u16 = 3;
 const KEY_Q: u16 = 12;
 const KEY_EQUALS: u16 = 24;
@@ -39,7 +42,10 @@ pub struct DrawState {
     pub image_origin: NSPoint,
     pub drag_anchor_view: Option<NSPoint>,
     pub flashlight_enabled: bool,
+    pub flashlight_progress: f64,
     pub flashlight_radius: f64,
+    pub flashlight_animation_from: f64,
+    pub flashlight_animation_started_at: Option<Instant>,
 }
 
 thread_local! {
@@ -62,13 +68,55 @@ pub fn with_session_mut<R>(f: impl FnOnce(&mut DrawState) -> R) -> Option<R> {
     SESSION.with(|c| c.borrow_mut().as_mut().map(f))
 }
 
+fn flashlight_target_progress(st: &DrawState) -> f64 {
+    if st.flashlight_enabled {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn ease_in_out(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn update_flashlight_animation(st: &mut DrawState) -> bool {
+    let Some(started_at) = st.flashlight_animation_started_at else {
+        return false;
+    };
+
+    let target = flashlight_target_progress(st);
+    let t = (started_at.elapsed().as_secs_f64() / FLASHLIGHT_TOGGLE_DURATION_SECS).clamp(0.0, 1.0);
+    st.flashlight_progress =
+        st.flashlight_animation_from + (target - st.flashlight_animation_from) * ease_in_out(t);
+
+    if t >= 1.0 {
+        st.flashlight_progress = target;
+        st.flashlight_animation_started_at = None;
+        return false;
+    }
+
+    true
+}
+
+fn start_flashlight_animation(st: &mut DrawState, enabled: bool) {
+    let _ = update_flashlight_animation(st);
+    st.flashlight_enabled = enabled;
+    st.flashlight_animation_from = st.flashlight_progress;
+    st.flashlight_animation_started_at = Some(Instant::now());
+}
+
 fn reset_state(st: &mut DrawState) {
     st.zoom = DEFAULT_ZOOM;
     st.pointer_view = NSPoint { x: 0.0, y: 0.0 };
     st.image_origin = NSPoint { x: 0.0, y: 0.0 };
     st.drag_anchor_view = None;
     st.flashlight_enabled = false;
+    st.flashlight_progress = 0.0;
     st.flashlight_radius = DEFAULT_FLASHLIGHT_RADIUS;
+    st.flashlight_animation_from = 0.0;
+    st.flashlight_animation_started_at = None;
 }
 
 const Z_EPS: f64 = 1e-9;
@@ -127,7 +175,8 @@ fn zoom_keyboard_anchored(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, 
 }
 
 fn event_point_in_view(ev: &NSEvent, view: &CoomerView) -> NSPoint {
-    view.as_super().convertPoint_fromView(ev.locationInWindow(), None)
+    view.as_super()
+        .convertPoint_fromView(ev.locationInWindow(), None)
 }
 
 fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
@@ -143,6 +192,11 @@ fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
             unsafe {
                 NSEvent::removeMonitor(&m);
             }
+        }
+    });
+    ANIMATION_TIMER.with(|c| {
+        if let Some(timer) = c.borrow_mut().take() {
+            timer.invalidate();
         }
     });
     NSCursor::unhide();
@@ -199,6 +253,7 @@ define_class!(
                 };
                 let bounds = self.bounds();
                 st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+                let _ = update_flashlight_animation(st);
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
                     return;
                 };
@@ -219,7 +274,7 @@ define_class!(
                     zoom,
                     pointer,
                     image_origin,
-                    st.flashlight_enabled,
+                    st.flashlight_progress,
                     st.flashlight_radius,
                 );
             });
@@ -231,6 +286,35 @@ define_class!(
 
 thread_local! {
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
+    static ANIMATION_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+}
+
+fn ensure_animation_timer(view: Retained<CoomerView>) {
+    ANIMATION_TIMER.with(|c| {
+        if c.borrow().as_ref().is_some_and(|timer| timer.isValid()) {
+            return;
+        }
+
+        let view_for_timer = view.clone();
+        let block = block2::RcBlock::new(move |timer: core::ptr::NonNull<NSTimer>| {
+            let animating = with_session_mut(update_flashlight_animation).unwrap_or(false);
+            view_for_timer.setNeedsDisplay(true);
+            if !animating {
+                unsafe { timer.as_ref() }.invalidate();
+                ANIMATION_TIMER.with(|c| {
+                    c.borrow_mut().take();
+                });
+            }
+        });
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                FLASHLIGHT_TIMER_INTERVAL_SECS,
+                true,
+                &block,
+            )
+        };
+        *c.borrow_mut() = Some(timer);
+    });
 }
 
 pub fn spawn_window(
@@ -256,7 +340,8 @@ pub fn spawn_window(
     w.setOpaque(false);
     w.setBackgroundColor(Some(&NSColor::clearColor()));
     w.setCollectionBehavior(
-        NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
     w.setIgnoresMouseEvents(false);
     w.setAcceptsMouseMovedEvents(true);
@@ -300,8 +385,9 @@ pub fn install_local_monitor(
                 }
                 KEY_F => {
                     with_session_mut(|st| {
-                        st.flashlight_enabled = !st.flashlight_enabled;
+                        start_flashlight_animation(st, !st.flashlight_enabled);
                     });
+                    ensure_animation_timer(view.clone());
                     view.setNeedsDisplay(true);
                     return core::ptr::null_mut();
                 }
@@ -351,10 +437,8 @@ pub fn install_local_monitor(
             let bounds = view.as_super().bounds();
             with_session_mut(|st| {
                 st.pointer_view = point;
-                let cmd = ev
-                    .modifierFlags()
-                    .contains(NSEventModifierFlags::Command);
-                if cmd && st.flashlight_enabled {
+                let cmd = ev.modifierFlags().contains(NSEventModifierFlags::Command);
+                if cmd && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
                     let k = if precise {
                         FLASHLIGHT_SCROLL_FACTOR_PRECISE
                     } else {
@@ -428,10 +512,8 @@ pub fn install_local_monitor(
         event.as_ptr()
     });
 
-    let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block)
-    }
-    .expect("addLocalMonitorForEventsMatchingMask");
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
+        .expect("addLocalMonitorForEventsMatchingMask");
     MONITOR.with(|c| {
         *c.borrow_mut() = Some(monitor.clone());
     });
