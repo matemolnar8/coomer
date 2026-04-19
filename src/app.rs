@@ -2,6 +2,7 @@ use objc2::ClassType;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::capture;
 use crate::overlay::{self, DrawState};
@@ -60,6 +61,9 @@ pub fn run() -> Result<(), String> {
         flashlight_radius: overlay::DEFAULT_FLASHLIGHT_RADIUS,
         flashlight_animation_from: 0.0,
         flashlight_animation_started_at: None,
+        fade_in_progress: 0.0,
+        fade_in_animation_started_at: Some(Instant::now()),
+        fade_in_animation_from: 0.0,
     });
 
     let app = NSApplication::sharedApplication(mtm);

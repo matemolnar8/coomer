@@ -28,6 +28,7 @@ const FLASHLIGHT_SCROLL_FACTOR_PRECISE: f64 = 2.5;
 const FLASHLIGHT_SCROLL_FACTOR_LINE: f64 = 12.0;
 const FLASHLIGHT_TOGGLE_DURATION_SECS: f64 = 0.18;
 const FLASHLIGHT_TIMER_INTERVAL_SECS: f64 = 1.0 / 60.0;
+const FADE_IN_DURATION_SECS: f64 = 0.8;
 const KEY_F: u16 = 3;
 const KEY_Q: u16 = 12;
 const KEY_EQUALS: u16 = 24;
@@ -41,6 +42,11 @@ pub struct DrawState {
     pub pointer_view: NSPoint,
     pub image_origin: NSPoint,
     pub drag_anchor_view: Option<NSPoint>,
+
+    pub fade_in_progress: f64,
+    pub fade_in_animation_started_at: Option<Instant>,
+    pub fade_in_animation_from: f64,
+
     pub flashlight_enabled: bool,
     pub flashlight_progress: f64,
     pub flashlight_radius: f64,
@@ -90,6 +96,25 @@ fn update_flashlight_animation(st: &mut DrawState) -> bool {
     if t >= 1.0 {
         st.flashlight_progress = target;
         st.flashlight_animation_started_at = None;
+        return false;
+    }
+
+    true
+}
+
+fn update_fade_in_animation(st: &mut DrawState) -> bool {
+    let Some(started_at) = st.fade_in_animation_started_at else {
+        return false;
+    };
+
+    let target = 1.0;
+    let t = (started_at.elapsed().as_secs_f64() / FADE_IN_DURATION_SECS).clamp(0.0, 1.0);
+    st.fade_in_progress =
+        st.fade_in_animation_from + (target - st.fade_in_animation_from) * ease_in_out(t);
+
+    if t >= 1.0 {
+        st.fade_in_progress = target;
+        st.fade_in_animation_started_at = None;
         return false;
     }
 
@@ -250,6 +275,7 @@ define_class!(
                 let bounds = self.bounds();
                 st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
                 let _ = update_flashlight_animation(st);
+                let _ = update_fade_in_animation(st);
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
                     return;
                 };
@@ -272,6 +298,7 @@ define_class!(
                     image_origin,
                     st.flashlight_progress,
                     st.flashlight_radius,
+                    st.fade_in_progress,
                 );
             });
         }
@@ -293,9 +320,11 @@ fn ensure_animation_timer(view: Retained<CoomerView>) {
 
         let view_for_timer = view.clone();
         let block = block2::RcBlock::new(move |timer: core::ptr::NonNull<NSTimer>| {
-            let animating = with_session_mut(update_flashlight_animation).unwrap_or(false);
+            let animating_flashlight =
+                with_session_mut(update_flashlight_animation).unwrap_or(false);
+            let animating_fade_in = with_session_mut(update_fade_in_animation).unwrap_or(false);
             view_for_timer.setNeedsDisplay(true);
-            if !animating {
+            if !animating_flashlight && !animating_fade_in {
                 unsafe { timer.as_ref() }.invalidate();
                 ANIMATION_TIMER.with(|c| {
                     c.borrow_mut().take();
@@ -359,6 +388,7 @@ pub fn spawn_window(
     );
     w.setContentView(Some(v));
     w.makeFirstResponder(Some(v));
+    ensure_animation_timer(view.clone());
     Ok((window, view))
 }
 

@@ -20,6 +20,7 @@ pub fn draw_session(
     image_origin: CGPoint,
     flashlight_progress: f64,
     flashlight_radius: f64,
+    fade_in_progress: f64,
 ) {
     let bounds = nsrect_to_cgrect(view_bounds);
     let objc_img: &CGImage = unsafe { &*(ForeignType::as_ptr(image).cast::<CGImage>()) };
@@ -32,6 +33,15 @@ pub fn draw_session(
         ),
     );
     CGContext::draw_image(c, scaled, Some(objc_img));
+
+    let fade_progress = fade_in_progress.clamp(0.0, 1.0) as CGFloat;
+    if fade_progress > 0.0 {
+        CGContext::set_rgb_fill_color(c, 1.0, 1.0, 1.0, 0.3 * (1.0 - fade_progress));
+        CGContext::begin_path(c);
+        CGContext::add_rect(c, bounds);
+        CGContext::fill_path(c);
+    }
+
     let progress = flashlight_progress.clamp(0.0, 1.0) as CGFloat;
     if progress > 0.0 {
         let radius = flashlight_radius as CGFloat * (0.9 + 0.1 * progress);
