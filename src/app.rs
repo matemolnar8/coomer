@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::capture;
 use crate::overlay::{self, DrawState};
+use crate::permissions;
 
 fn coomer_data_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME not set")?;
@@ -36,7 +37,7 @@ fn replace_running_instance() -> Result<(), String> {
     Ok(())
 }
 
-fn cleanup_pidfile() {
+pub(crate) fn cleanup_pidfile() {
     if let Ok(dir) = coomer_data_dir() {
         let _ = std::fs::remove_file(dir.join("pid"));
     }
@@ -46,6 +47,10 @@ pub fn run() -> Result<(), String> {
     replace_running_instance()?;
 
     let mtm = MainThreadMarker::new().ok_or("coomer must run on the main thread")?;
+
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    permissions::ensure_screen_capture_access(mtm, &app);
 
     let cap = capture::capture_under_cursor(mtm)?;
     let mouse = objc2_app_kit::NSEvent::mouseLocation();
@@ -65,9 +70,6 @@ pub fn run() -> Result<(), String> {
         fade_in_animation_started_at: Some(Instant::now()),
         fade_in_animation_from: 0.0,
     });
-
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
 
     let (window, view) = overlay::spawn_window(mtm, &cap.screen, cap.window_frame)?;
 

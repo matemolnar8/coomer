@@ -11,6 +11,8 @@ mod input;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
+mod permissions;
+#[cfg(target_os = "macos")]
 mod render;
 
 #[cfg(target_os = "macos")]

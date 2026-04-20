@@ -30,8 +30,11 @@ objc2-foundation = { version = "0.3.2", features = [
     "block2",
 ] }
 objc2-app-kit = { version = "0.3.2", features = [
+    "NSAlert",
     "NSApplication",
+    "NSButton",
     "NSColor",
+    "NSControl",
     "NSCursor",
     "NSEvent",
     "NSGraphics",
