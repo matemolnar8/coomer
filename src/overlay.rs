@@ -4,37 +4,71 @@ use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel,
+    NSEventModifierFlags, NSEventType, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
+    NSGraphicsContext, NSImage, NSImageView, NSScreen, NSScreenSaverWindowLevel, NSTextField,
     NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGPoint;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSTimer};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::render;
 
-pub const DEFAULT_ZOOM: f64 = 1.0;
-const MIN_ZOOM: f64 = 1.0;
-const MAX_ZOOM: f64 = 4.0;
-const ZOOM_SCROLL_FACTOR_PRECISE: f64 = 0.004;
-const ZOOM_SCROLL_FACTOR_LINE: f64 = 0.07;
-const KEYBOARD_ZOOM_MULTIPLIER: f64 = 1.08;
+mod config {
+    pub(super) mod zoom {
+        pub const DEFAULT: f64 = 1.0;
+        pub const MIN: f64 = 1.0;
+        pub const MAX: f64 = 4.0;
+        pub const SCROLL_FACTOR_PRECISE: f64 = 0.004;
+        pub const SCROLL_FACTOR_LINE: f64 = 0.07;
+        pub const KEYBOARD_MULTIPLIER: f64 = 1.08;
+        pub const EPSILON: f64 = 1e-9;
+    }
 
-pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = 144.0;
-const MIN_FLASHLIGHT_RADIUS: f64 = 24.0;
-const MAX_FLASHLIGHT_RADIUS: f64 = 320.0;
-const FLASHLIGHT_SCROLL_FACTOR_PRECISE: f64 = 2.5;
-const FLASHLIGHT_SCROLL_FACTOR_LINE: f64 = 12.0;
-const FLASHLIGHT_TOGGLE_DURATION_SECS: f64 = 0.18;
-const FLASHLIGHT_TIMER_INTERVAL_SECS: f64 = 1.0 / 60.0;
-const FADE_IN_DURATION_SECS: f64 = 0.8;
-const KEY_F: u16 = 3;
-const KEY_Q: u16 = 12;
-const KEY_EQUALS: u16 = 24;
-const KEY_MINUS: u16 = 27;
-const KEY_0: u16 = 29;
-const KEY_ESCAPE: u16 = 53;
+    pub(super) mod flashlight {
+        pub const DEFAULT_RADIUS: f64 = 144.0;
+        pub const MIN_RADIUS: f64 = 24.0;
+        pub const MAX_RADIUS: f64 = 320.0;
+        pub const SCROLL_FACTOR_PRECISE: f64 = 2.5;
+        pub const SCROLL_FACTOR_LINE: f64 = 12.0;
+        pub const TOGGLE_DURATION_SECS: f64 = 0.18;
+        pub const TIMER_INTERVAL_SECS: f64 = 1.0 / 60.0;
+    }
+
+    pub(super) mod fade_in {
+        pub const DURATION_SECS: f64 = 0.8;
+    }
+
+    pub(super) mod hud {
+        pub const ANIMATION_DELAY_SECS: f64 = 1.0;
+        pub const ANIMATION_DURATION_SECS: f64 = 0.6;
+        pub const LAUNCH_WIDTH: f64 = 288.0;
+        pub const SETTLED_WIDTH: f64 = 144.0;
+        pub const LAUNCH_HEIGHT: f64 = 58.0;
+        pub const SETTLED_HEIGHT: f64 = 46.0;
+        pub const TOP_MARGIN_LAUNCH: f64 = 20.0;
+        pub const TOP_MARGIN_SETTLED: f64 = 14.0;
+        pub const LAUNCH_PADDING_X: f64 = 20.0;
+        pub const SETTLED_PADDING_X: f64 = 12.0;
+        pub const LAUNCH_GAP: f64 = 10.0;
+        pub const SETTLED_GAP: f64 = 8.0;
+        pub const LAUNCH_HINT_WIDTH: f64 = 86.0;
+        pub const SETTLED_HINT_WIDTH: f64 = 80.0;
+    }
+
+    pub(super) mod key {
+        pub const FLASHLIGHT_TOGGLE: u16 = 3;
+        pub const QUIT: u16 = 12;
+        pub const ZOOM_IN: u16 = 24;
+        pub const ZOOM_OUT: u16 = 27;
+        pub const RESET: u16 = 29;
+        pub const ESCAPE: u16 = 53;
+    }
+}
+
+pub const DEFAULT_ZOOM: f64 = config::zoom::DEFAULT;
+pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = config::flashlight::DEFAULT_RADIUS;
 
 pub struct DrawState {
     pub image: CGImage,
@@ -46,6 +80,10 @@ pub struct DrawState {
     pub fade_in_progress: f64,
     pub fade_in_animation_started_at: Option<Instant>,
     pub fade_in_animation_from: f64,
+
+    pub hud_progress: f64,
+    pub hud_animation_started_at: Option<Instant>,
+    pub hud_animation_from: f64,
 
     pub flashlight_enabled: bool,
     pub flashlight_progress: f64,
@@ -89,7 +127,8 @@ fn update_flashlight_animation(st: &mut DrawState) -> bool {
     };
 
     let target = flashlight_target_progress(st);
-    let t = (started_at.elapsed().as_secs_f64() / FLASHLIGHT_TOGGLE_DURATION_SECS).clamp(0.0, 1.0);
+    let t = (started_at.elapsed().as_secs_f64() / config::flashlight::TOGGLE_DURATION_SECS)
+        .clamp(0.0, 1.0);
     st.flashlight_progress =
         st.flashlight_animation_from + (target - st.flashlight_animation_from) * ease_in_out(t);
 
@@ -108,13 +147,37 @@ fn update_fade_in_animation(st: &mut DrawState) -> bool {
     };
 
     let target = 1.0;
-    let t = (started_at.elapsed().as_secs_f64() / FADE_IN_DURATION_SECS).clamp(0.0, 1.0);
+    let t = (started_at.elapsed().as_secs_f64() / config::fade_in::DURATION_SECS).clamp(0.0, 1.0);
     st.fade_in_progress =
         st.fade_in_animation_from + (target - st.fade_in_animation_from) * ease_in_out(t);
 
     if t >= 1.0 {
         st.fade_in_progress = target;
         st.fade_in_animation_started_at = None;
+        return false;
+    }
+
+    true
+}
+
+fn update_hud_animation(st: &mut DrawState) -> bool {
+    let Some(started_at) = st.hud_animation_started_at else {
+        return false;
+    };
+
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed < config::hud::ANIMATION_DELAY_SECS {
+        return true;
+    }
+
+    let target = 1.0;
+    let t = ((elapsed - config::hud::ANIMATION_DELAY_SECS) / config::hud::ANIMATION_DURATION_SECS)
+        .clamp(0.0, 1.0);
+    st.hud_progress = st.hud_animation_from + (target - st.hud_animation_from) * ease_in_out(t);
+
+    if t >= 1.0 {
+        st.hud_progress = target;
+        st.hud_animation_started_at = None;
         return false;
     }
 
@@ -140,11 +203,9 @@ fn reset_state(st: &mut DrawState) {
     st.flashlight_animation_started_at = None;
 }
 
-const Z_EPS: f64 = 1e-9;
-
 fn clamp_image_origin(origin: NSPoint, bounds: NSRect, zoom: f64) -> NSPoint {
-    let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    if z <= 1.0 + Z_EPS {
+    let z = zoom.clamp(config::zoom::MIN, config::zoom::MAX);
+    if z <= 1.0 + config::zoom::EPSILON {
         return NSPoint { x: 0.0, y: 0.0 };
     }
     let w = bounds.size.width;
@@ -160,14 +221,14 @@ fn clamp_image_origin(origin: NSPoint, bounds: NSRect, zoom: f64) -> NSPoint {
 }
 
 fn anchor_zoom_to_cursor(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, new_zoom: f64) {
-    let new_zoom = new_zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    if new_zoom <= 1.0 + Z_EPS {
-        st.zoom = MIN_ZOOM;
+    let new_zoom = new_zoom.clamp(config::zoom::MIN, config::zoom::MAX);
+    if new_zoom <= 1.0 + config::zoom::EPSILON {
+        st.zoom = config::zoom::MIN;
         st.image_origin = NSPoint { x: 0.0, y: 0.0 };
         return;
     }
     let z0 = st.zoom;
-    if z0 <= 1.0 + Z_EPS {
+    if z0 <= 1.0 + config::zoom::EPSILON {
         st.image_origin = NSPoint {
             x: px * (1.0 - new_zoom),
             y: py * (1.0 - new_zoom),
@@ -187,11 +248,11 @@ fn anchor_zoom_to_cursor(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, n
 
 fn zoom_keyboard_anchored(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, direction: i32) {
     let factor = if direction > 0 {
-        KEYBOARD_ZOOM_MULTIPLIER
+        config::zoom::KEYBOARD_MULTIPLIER
     } else {
-        1.0 / KEYBOARD_ZOOM_MULTIPLIER
+        1.0 / config::zoom::KEYBOARD_MULTIPLIER
     };
-    let new_zoom = (st.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    let new_zoom = (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
     anchor_zoom_to_cursor(st, bounds, px, py, new_zoom);
 }
 
@@ -205,6 +266,217 @@ fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
         x: to.x - from.x,
         y: to.y - from.y,
     }
+}
+
+fn lerp(start: f64, end: f64, t: f64) -> f64 {
+    start + (end - start) * t
+}
+
+fn hud_frame(bounds: NSRect, progress: f64) -> NSRect {
+    let width = lerp(
+        config::hud::LAUNCH_WIDTH,
+        config::hud::SETTLED_WIDTH,
+        progress,
+    );
+    let height = lerp(
+        config::hud::LAUNCH_HEIGHT,
+        config::hud::SETTLED_HEIGHT,
+        progress,
+    );
+    let top_margin = lerp(
+        config::hud::TOP_MARGIN_LAUNCH,
+        config::hud::TOP_MARGIN_SETTLED,
+        progress,
+    );
+    NSRect {
+        origin: NSPoint {
+            x: ((bounds.size.width - width) * 0.5).round(),
+            y: (bounds.size.height - top_margin - height).round(),
+        },
+        size: NSSize { width, height },
+    }
+}
+
+struct OverlayHud {
+    glass: Retained<NSGlassEffectView>,
+    content: Retained<NSView>,
+    icon: Option<Retained<NSImageView>>,
+    title: Retained<NSTextField>,
+    hint: Retained<NSTextField>,
+}
+
+thread_local! {
+    static HUD: RefCell<Option<OverlayHud>> = const { RefCell::new(None) };
+}
+
+fn make_hud_label(
+    mtm: MainThreadMarker,
+    text: &str,
+    font_size: f64,
+    emphasized: bool,
+) -> Retained<NSTextField> {
+    let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    let font = if emphasized {
+        NSFont::boldSystemFontOfSize(font_size)
+    } else {
+        NSFont::systemFontOfSize(font_size)
+    };
+    let text_color = if emphasized {
+        NSColor::labelColor()
+    } else {
+        NSColor::secondaryLabelColor()
+    };
+    label.as_super().setFont(Some(&font));
+    label.as_super().setUsesSingleLineMode(true);
+    label.setTextColor(Some(&text_color));
+    label
+}
+
+fn create_hud(mtm: MainThreadMarker, host_view: &CoomerView) {
+    clear_hud();
+
+    let bounds = host_view.as_super().bounds();
+    let glass =
+        NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), hud_frame(bounds, 0.0));
+    glass.setStyle(NSGlassEffectViewStyle::Clear);
+    glass.setCornerRadius(23.0);
+    glass.setTintColor(None);
+    glass.as_super().setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewMinXMargin
+            | NSAutoresizingMaskOptions::ViewMaxXMargin
+            | NSAutoresizingMaskOptions::ViewMinYMargin,
+    );
+
+    let content = NSView::initWithFrame(NSView::alloc(mtm), glass.as_super().bounds());
+    content.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    glass.setContentView(Some(&content));
+
+    let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("record.circle.fill"),
+        Some(&NSString::from_str("Overlay active")),
+    )
+    .or_else(|| {
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("circle.fill"),
+            Some(&NSString::from_str("Overlay active")),
+        )
+    })
+    .map(|image| {
+        let view = NSImageView::imageViewWithImage(&image, mtm);
+        view.setContentTintColor(Some(&NSColor::systemBlueColor()));
+        view
+    });
+
+    let title = make_hud_label(mtm, "Coomer", 13.0, true);
+    let hint = make_hud_label(mtm, "Esc to close", 12.0, false);
+
+    if let Some(icon) = &icon {
+        content.addSubview(icon.as_super().as_super());
+    }
+    content.addSubview(title.as_super().as_super());
+    content.addSubview(hint.as_super().as_super());
+
+    host_view.as_super().addSubview(glass.as_super());
+    glass.as_super().setAlphaValue(1.0);
+
+    HUD.with(|slot| {
+        *slot.borrow_mut() = Some(OverlayHud {
+            glass,
+            content,
+            icon,
+            title,
+            hint,
+        });
+    });
+}
+
+fn sync_hud_layout(bounds: NSRect, progress: f64) {
+    HUD.with(|slot| {
+        let hud_slot = slot.borrow();
+        let Some(hud) = hud_slot.as_ref() else {
+            return;
+        };
+
+        let frame = hud_frame(bounds, progress);
+        hud.glass.as_super().setFrame(frame);
+        hud.glass.as_super().setAlphaValue(1.0);
+
+        let content_bounds = hud.glass.as_super().bounds();
+        hud.content.setFrame(content_bounds);
+
+        let pad_x = lerp(
+            config::hud::LAUNCH_PADDING_X,
+            config::hud::SETTLED_PADDING_X,
+            progress,
+        );
+        let icon_size = lerp(22.0, 18.0, progress);
+        let gap = lerp(config::hud::LAUNCH_GAP, config::hud::SETTLED_GAP, progress);
+        let hint_width = lerp(
+            config::hud::LAUNCH_HINT_WIDTH,
+            config::hud::SETTLED_HINT_WIDTH,
+            progress,
+        );
+        let content_height = content_bounds.size.height;
+        let baseline_y = ((content_height - 18.0) * 0.5).round();
+
+        let mut text_x = pad_x;
+        if let Some(icon) = &hud.icon {
+            let icon_y = ((content_height - icon_size) * 0.5).round();
+            icon.as_super().as_super().setFrame(NSRect {
+                origin: NSPoint {
+                    x: pad_x.round(),
+                    y: icon_y,
+                },
+                size: NSSize {
+                    width: icon_size,
+                    height: icon_size,
+                },
+            });
+            text_x += icon_size + gap;
+        }
+
+        hud.hint.as_super().as_super().setFrame(NSRect {
+            origin: NSPoint {
+                x: (content_bounds.size.width - pad_x - hint_width).round(),
+                y: baseline_y,
+            },
+            size: NSSize {
+                width: hint_width,
+                height: 18.0,
+            },
+        });
+        let title_view = hud.title.as_super().as_super();
+        if progress > 0.0 {
+            if title_view.isDescendantOf(&hud.content) {
+                title_view.removeFromSuperview();
+            }
+        } else {
+            if !title_view.isDescendantOf(&hud.content) {
+                hud.content.addSubview(title_view);
+            }
+            title_view.setFrame(NSRect {
+                origin: NSPoint {
+                    x: text_x.round(),
+                    y: baseline_y,
+                },
+                size: NSSize {
+                    width: (content_bounds.size.width - text_x - hint_width - pad_x - 8.0)
+                        .max(96.0),
+                    height: 18.0,
+                },
+            });
+        }
+    });
+}
+
+fn clear_hud() {
+    HUD.with(|slot| {
+        if let Some(hud) = slot.borrow_mut().take() {
+            hud.glass.as_super().removeFromSuperview();
+        }
+    });
 }
 
 fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
@@ -221,6 +493,7 @@ fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
         }
     });
     NSCursor::unhide();
+    clear_hud();
     clear_session();
     let app = NSApplication::sharedApplication(mtm);
     window.as_super().orderOut(None);
@@ -267,6 +540,7 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
+            let mut hud_progress = 1.0;
             SESSION.with(|c| {
                 let mut b = c.borrow_mut();
                 let Some(st) = b.as_mut() else {
@@ -276,11 +550,13 @@ define_class!(
                 st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
                 let _ = update_flashlight_animation(st);
                 let _ = update_fade_in_animation(st);
+                let _ = update_hud_animation(st);
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
                     return;
                 };
                 let cg_ctx = ns_ctx.CGContext();
-                let zoom = st.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+                let zoom = st.zoom.clamp(config::zoom::MIN, config::zoom::MAX);
+                hud_progress = st.hud_progress.clamp(0.0, 1.0);
                 let pointer = CGPoint {
                     x: st.pointer_view.x as _,
                     y: st.pointer_view.y as _,
@@ -301,6 +577,7 @@ define_class!(
                     st.fade_in_progress,
                 );
             });
+            sync_hud_layout(self.bounds(), ease_in_out(hud_progress));
         }
     }
 
@@ -323,8 +600,9 @@ fn ensure_animation_timer(view: Retained<CoomerView>) {
             let animating_flashlight =
                 with_session_mut(update_flashlight_animation).unwrap_or(false);
             let animating_fade_in = with_session_mut(update_fade_in_animation).unwrap_or(false);
+            let animating_hud = with_session_mut(update_hud_animation).unwrap_or(false);
             view_for_timer.setNeedsDisplay(true);
-            if !animating_flashlight && !animating_fade_in {
+            if !animating_flashlight && !animating_fade_in && !animating_hud {
                 unsafe { timer.as_ref() }.invalidate();
                 ANIMATION_TIMER.with(|c| {
                     c.borrow_mut().take();
@@ -333,7 +611,7 @@ fn ensure_animation_timer(view: Retained<CoomerView>) {
         });
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                FLASHLIGHT_TIMER_INTERVAL_SECS,
+                config::flashlight::TIMER_INTERVAL_SECS,
                 true,
                 &block,
             )
@@ -387,7 +665,9 @@ pub fn spawn_window(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     w.setContentView(Some(v));
+    create_hud(mtm, &view);
     w.makeFirstResponder(Some(v));
+    sync_hud_layout(v.bounds(), 0.0);
     ensure_animation_timer(view.clone());
     Ok((window, view))
 }
@@ -405,11 +685,11 @@ pub fn install_local_monitor(
 
         if ty == NSEventType::KeyDown {
             match ev.keyCode() {
-                KEY_Q | KEY_ESCAPE => {
+                config::key::QUIT | config::key::ESCAPE => {
                     stop_overlay(mtm_for, &window);
                     return core::ptr::null_mut();
                 }
-                KEY_F => {
+                config::key::FLASHLIGHT_TOGGLE => {
                     with_session_mut(|st| {
                         start_flashlight_animation(st, !st.flashlight_enabled);
                     });
@@ -417,7 +697,7 @@ pub fn install_local_monitor(
                     view.setNeedsDisplay(true);
                     return core::ptr::null_mut();
                 }
-                KEY_0 => {
+                config::key::RESET => {
                     let pointer = event_point_in_view(ev, &view);
                     with_session_mut(|st| {
                         reset_state(st);
@@ -426,7 +706,7 @@ pub fn install_local_monitor(
                     view.setNeedsDisplay(true);
                     return core::ptr::null_mut();
                 }
-                KEY_EQUALS => {
+                config::key::ZOOM_IN => {
                     let bounds = view.as_super().bounds();
                     with_session_mut(|st| {
                         let p = st.pointer_view;
@@ -435,7 +715,7 @@ pub fn install_local_monitor(
                     view.setNeedsDisplay(true);
                     return core::ptr::null_mut();
                 }
-                KEY_MINUS => {
+                config::key::ZOOM_OUT => {
                     let bounds = view.as_super().bounds();
                     with_session_mut(|st| {
                         let p = st.pointer_view;
@@ -466,20 +746,22 @@ pub fn install_local_monitor(
                 let cmd = ev.modifierFlags().contains(NSEventModifierFlags::Command);
                 if cmd && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
                     let k = if precise {
-                        FLASHLIGHT_SCROLL_FACTOR_PRECISE
+                        config::flashlight::SCROLL_FACTOR_PRECISE
                     } else {
-                        FLASHLIGHT_SCROLL_FACTOR_LINE
+                        config::flashlight::SCROLL_FACTOR_LINE
                     };
-                    st.flashlight_radius = (st.flashlight_radius + dy * k)
-                        .clamp(MIN_FLASHLIGHT_RADIUS, MAX_FLASHLIGHT_RADIUS);
+                    st.flashlight_radius = (st.flashlight_radius + dy * k).clamp(
+                        config::flashlight::MIN_RADIUS,
+                        config::flashlight::MAX_RADIUS,
+                    );
                 } else {
-                    let line_factor = 1.0 + dy * ZOOM_SCROLL_FACTOR_LINE;
+                    let line_factor = 1.0 + dy * config::zoom::SCROLL_FACTOR_LINE;
                     let factor = if precise {
-                        1.0 + dy * ZOOM_SCROLL_FACTOR_PRECISE
+                        1.0 + dy * config::zoom::SCROLL_FACTOR_PRECISE
                     } else {
                         line_factor
                     };
-                    let new_zoom = (st.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                    let new_zoom = (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
                     anchor_zoom_to_cursor(st, bounds, point.x, point.y, new_zoom);
                 }
             });
@@ -502,7 +784,7 @@ pub fn install_local_monitor(
             let bounds = view.as_super().bounds();
             with_session_mut(|st| {
                 if let Some(anchor) = st.drag_anchor_view {
-                    if st.zoom > 1.0 + Z_EPS {
+                    if st.zoom > 1.0 + config::zoom::EPSILON {
                         let d = point_delta(anchor, point);
                         st.image_origin.x += d.x;
                         st.image_origin.y += d.y;

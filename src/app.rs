@@ -69,6 +69,9 @@ pub fn run() -> Result<(), String> {
         fade_in_progress: 0.0,
         fade_in_animation_started_at: Some(Instant::now()),
         fade_in_animation_from: 0.0,
+        hud_progress: 0.0,
+        hud_animation_started_at: Some(Instant::now()),
+        hud_animation_from: 0.0,
     });
 
     let (window, view) = overlay::spawn_window(mtm, &cap.screen, cap.window_frame)?;
