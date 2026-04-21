@@ -1,12 +1,10 @@
+use crate::capture;
+use crate::overlay::{self, DrawState};
+use crate::permissions;
 use objc2::ClassType;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::path::PathBuf;
-use std::time::Instant;
-
-use crate::capture;
-use crate::overlay::{self, DrawState};
-use crate::permissions;
 
 fn coomer_data_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME not set")?;
@@ -61,17 +59,16 @@ pub fn run() -> Result<(), String> {
         pointer_view: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
         image_origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
         drag_anchor_view: None,
+        last_frame_timestamp: None,
         flashlight_enabled: false,
         flashlight_progress: 0.0,
         flashlight_radius: overlay::DEFAULT_FLASHLIGHT_RADIUS,
         flashlight_animation_from: 0.0,
-        flashlight_animation_started_at: None,
+        flashlight_animation_elapsed_secs: 0.0,
+        flashlight_animating: false,
         fade_in_progress: 0.0,
-        fade_in_animation_started_at: Some(Instant::now()),
-        fade_in_animation_from: 0.0,
-        hud_progress: 0.0,
-        hud_animation_started_at: Some(Instant::now()),
-        hud_animation_from: 0.0,
+        fade_in_elapsed_secs: 0.0,
+        fade_in_animating: true,
     });
 
     let (window, view) = overlay::spawn_window(mtm, &cap.screen, cap.window_frame)?;

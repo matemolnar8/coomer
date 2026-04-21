@@ -1,17 +1,20 @@
 use core_graphics::image::CGImage;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{ClassType, MainThreadOnly, define_class, msg_send};
+use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSEvent,
-    NSEventModifierFlags, NSEventType, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
-    NSGraphicsContext, NSImage, NSImageView, NSScreen, NSScreenSaverWindowLevel, NSTextField,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventModifierFlags, NSEventType, NSFont,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSGraphicsContext, NSImage, NSImageView, NSScreen,
+    NSScreenSaverWindowLevel, NSTextField, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::CGPoint;
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{
+    MainThreadMarker, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+};
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use std::cell::RefCell;
-use std::time::Instant;
 
 use crate::render;
 
@@ -33,7 +36,6 @@ mod config {
         pub const SCROLL_FACTOR_PRECISE: f64 = 2.5;
         pub const SCROLL_FACTOR_LINE: f64 = 12.0;
         pub const TOGGLE_DURATION_SECS: f64 = 0.18;
-        pub const TIMER_INTERVAL_SECS: f64 = 1.0 / 60.0;
     }
 
     pub(super) mod fade_in {
@@ -76,20 +78,18 @@ pub struct DrawState {
     pub pointer_view: NSPoint,
     pub image_origin: NSPoint,
     pub drag_anchor_view: Option<NSPoint>,
+    pub last_frame_timestamp: Option<f64>,
 
     pub fade_in_progress: f64,
-    pub fade_in_animation_started_at: Option<Instant>,
-    pub fade_in_animation_from: f64,
-
-    pub hud_progress: f64,
-    pub hud_animation_started_at: Option<Instant>,
-    pub hud_animation_from: f64,
+    pub fade_in_elapsed_secs: f64,
+    pub fade_in_animating: bool,
 
     pub flashlight_enabled: bool,
     pub flashlight_progress: f64,
     pub flashlight_radius: f64,
     pub flashlight_animation_from: f64,
-    pub flashlight_animation_started_at: Option<Instant>,
+    pub flashlight_animation_elapsed_secs: f64,
+    pub flashlight_animating: bool,
 }
 
 thread_local! {
@@ -121,74 +121,80 @@ fn ease_in_out(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn update_flashlight_animation(st: &mut DrawState) -> bool {
-    let Some(started_at) = st.flashlight_animation_started_at else {
+fn advance_animation(elapsed_secs: &mut f64, duration_secs: f64, frame_delta_secs: f64) -> f64 {
+    *elapsed_secs = (*elapsed_secs + frame_delta_secs).min(duration_secs);
+    (*elapsed_secs / duration_secs).clamp(0.0, 1.0)
+}
+
+fn update_flashlight_animation(st: &mut DrawState, frame_delta_secs: f64) -> bool {
+    if !st.flashlight_animating {
         return false;
-    };
+    }
 
     let target = flashlight_target_progress(st);
-    let t = (started_at.elapsed().as_secs_f64() / config::flashlight::TOGGLE_DURATION_SECS)
-        .clamp(0.0, 1.0);
+    let t = advance_animation(
+        &mut st.flashlight_animation_elapsed_secs,
+        config::flashlight::TOGGLE_DURATION_SECS,
+        frame_delta_secs,
+    );
     st.flashlight_progress =
         st.flashlight_animation_from + (target - st.flashlight_animation_from) * ease_in_out(t);
 
     if t >= 1.0 {
         st.flashlight_progress = target;
-        st.flashlight_animation_started_at = None;
+        st.flashlight_animation_elapsed_secs = 0.0;
+        st.flashlight_animating = false;
         return false;
     }
 
     true
 }
 
-fn update_fade_in_animation(st: &mut DrawState) -> bool {
-    let Some(started_at) = st.fade_in_animation_started_at else {
+fn update_fade_in_animation(st: &mut DrawState, frame_delta_secs: f64) -> bool {
+    if !st.fade_in_animating {
         return false;
-    };
+    }
 
-    let target = 1.0;
-    let t = (started_at.elapsed().as_secs_f64() / config::fade_in::DURATION_SECS).clamp(0.0, 1.0);
-    st.fade_in_progress =
-        st.fade_in_animation_from + (target - st.fade_in_animation_from) * ease_in_out(t);
+    let t = advance_animation(
+        &mut st.fade_in_elapsed_secs,
+        config::fade_in::DURATION_SECS,
+        frame_delta_secs,
+    );
+    st.fade_in_progress = ease_in_out(t);
 
     if t >= 1.0 {
-        st.fade_in_progress = target;
-        st.fade_in_animation_started_at = None;
+        st.fade_in_progress = 1.0;
+        st.fade_in_elapsed_secs = 0.0;
+        st.fade_in_animating = false;
         return false;
     }
 
     true
 }
 
-fn update_hud_animation(st: &mut DrawState) -> bool {
-    let Some(started_at) = st.hud_animation_started_at else {
-        return false;
-    };
+fn step_overlay_animations(
+    st: &mut DrawState,
+    frame_timestamp: f64,
+    fallback_delta_secs: f64,
+) -> bool {
+    let frame_delta_secs = st
+        .last_frame_timestamp
+        .map(|prev| frame_timestamp - prev)
+        .unwrap_or(fallback_delta_secs)
+        .clamp(0.0, 0.25);
+    st.last_frame_timestamp = Some(frame_timestamp);
 
-    let elapsed = started_at.elapsed().as_secs_f64();
-    if elapsed < config::hud::ANIMATION_DELAY_SECS {
-        return true;
-    }
-
-    let target = 1.0;
-    let t = ((elapsed - config::hud::ANIMATION_DELAY_SECS) / config::hud::ANIMATION_DURATION_SECS)
-        .clamp(0.0, 1.0);
-    st.hud_progress = st.hud_animation_from + (target - st.hud_animation_from) * ease_in_out(t);
-
-    if t >= 1.0 {
-        st.hud_progress = target;
-        st.hud_animation_started_at = None;
-        return false;
-    }
-
-    true
+    let animating_flashlight = update_flashlight_animation(st, frame_delta_secs);
+    let animating_fade_in = update_fade_in_animation(st, frame_delta_secs);
+    animating_flashlight || animating_fade_in
 }
 
 fn start_flashlight_animation(st: &mut DrawState, enabled: bool) {
-    let _ = update_flashlight_animation(st);
     st.flashlight_enabled = enabled;
     st.flashlight_animation_from = st.flashlight_progress;
-    st.flashlight_animation_started_at = Some(Instant::now());
+    st.flashlight_animation_elapsed_secs = 0.0;
+    st.flashlight_animating = true;
+    st.last_frame_timestamp = None;
 }
 
 fn reset_state(st: &mut DrawState) {
@@ -200,7 +206,8 @@ fn reset_state(st: &mut DrawState) {
     st.flashlight_progress = 0.0;
     st.flashlight_radius = DEFAULT_FLASHLIGHT_RADIUS;
     st.flashlight_animation_from = 0.0;
-    st.flashlight_animation_started_at = None;
+    st.flashlight_animation_elapsed_secs = 0.0;
+    st.flashlight_animating = false;
 }
 
 fn clamp_image_origin(origin: NSPoint, bounds: NSRect, zoom: f64) -> NSPoint {
@@ -272,7 +279,28 @@ fn lerp(start: f64, end: f64, t: f64) -> f64 {
     start + (end - start) * t
 }
 
-fn hud_frame(bounds: NSRect, progress: f64) -> NSRect {
+struct OverlayHud {
+    glass: Retained<NSGlassEffectView>,
+    content: Retained<NSView>,
+    icon: Option<Retained<NSImageView>>,
+    title: Retained<NSTextField>,
+    hint: Retained<NSTextField>,
+    settled: bool,
+}
+
+struct HudLayout {
+    glass_frame: NSRect,
+    icon_frame: Option<NSRect>,
+    title_frame: NSRect,
+    hint_frame: NSRect,
+    title_alpha: f64,
+}
+
+thread_local! {
+    static HUD: RefCell<Option<OverlayHud>> = const { RefCell::new(None) };
+}
+
+fn hud_layout(bounds: NSRect, progress: f64) -> HudLayout {
     let width = lerp(
         config::hud::LAUNCH_WIDTH,
         config::hud::SETTLED_WIDTH,
@@ -288,25 +316,71 @@ fn hud_frame(bounds: NSRect, progress: f64) -> NSRect {
         config::hud::TOP_MARGIN_SETTLED,
         progress,
     );
-    NSRect {
+    let glass_frame = NSRect {
         origin: NSPoint {
             x: ((bounds.size.width - width) * 0.5).round(),
             y: (bounds.size.height - top_margin - height).round(),
         },
         size: NSSize { width, height },
+    };
+    let content_bounds = NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size: glass_frame.size,
+    };
+    let pad_x = lerp(
+        config::hud::LAUNCH_PADDING_X,
+        config::hud::SETTLED_PADDING_X,
+        progress,
+    );
+    let icon_size = lerp(22.0, 18.0, progress);
+    let gap = lerp(config::hud::LAUNCH_GAP, config::hud::SETTLED_GAP, progress);
+    let hint_width = lerp(
+        config::hud::LAUNCH_HINT_WIDTH,
+        config::hud::SETTLED_HINT_WIDTH,
+        progress,
+    );
+    let baseline_y = ((content_bounds.size.height - 18.0) * 0.5).round();
+    let mut text_x = pad_x;
+    let icon_frame = Some(NSRect {
+        origin: NSPoint {
+            x: pad_x.round(),
+            y: ((content_bounds.size.height - icon_size) * 0.5).round(),
+        },
+        size: NSSize {
+            width: icon_size,
+            height: icon_size,
+        },
+    });
+    text_x += icon_size + gap;
+
+    let hint_frame = NSRect {
+        origin: NSPoint {
+            x: (content_bounds.size.width - pad_x - hint_width).round(),
+            y: baseline_y,
+        },
+        size: NSSize {
+            width: hint_width,
+            height: 18.0,
+        },
+    };
+    let title_frame = NSRect {
+        origin: NSPoint {
+            x: text_x.round(),
+            y: baseline_y,
+        },
+        size: NSSize {
+            width: (content_bounds.size.width - text_x - hint_width - pad_x - 8.0).max(96.0),
+            height: 18.0,
+        },
+    };
+
+    HudLayout {
+        glass_frame,
+        icon_frame,
+        title_frame,
+        hint_frame,
+        title_alpha: 1.0 - progress,
     }
-}
-
-struct OverlayHud {
-    glass: Retained<NSGlassEffectView>,
-    content: Retained<NSView>,
-    icon: Option<Retained<NSImageView>>,
-    title: Retained<NSTextField>,
-    hint: Retained<NSTextField>,
-}
-
-thread_local! {
-    static HUD: RefCell<Option<OverlayHud>> = const { RefCell::new(None) };
 }
 
 fn make_hud_label(
@@ -336,8 +410,10 @@ fn create_hud(mtm: MainThreadMarker, host_view: &CoomerView) {
     clear_hud();
 
     let bounds = host_view.as_super().bounds();
-    let glass =
-        NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), hud_frame(bounds, 0.0));
+    let glass = NSGlassEffectView::initWithFrame(
+        NSGlassEffectView::alloc(mtm),
+        hud_layout(bounds, 0.0).glass_frame,
+    );
     glass.setStyle(NSGlassEffectViewStyle::Clear);
     glass.setCornerRadius(23.0);
     glass.setTintColor(None);
@@ -388,90 +464,133 @@ fn create_hud(mtm: MainThreadMarker, host_view: &CoomerView) {
             icon,
             title,
             hint,
+            settled: false,
         });
     });
+
+    apply_hud_layout(bounds, false);
+    schedule_hud_settle();
 }
 
-fn sync_hud_layout(bounds: NSRect, progress: f64) {
+fn apply_hud_layout(bounds: NSRect, settled: bool) {
     HUD.with(|slot| {
         let hud_slot = slot.borrow();
         let Some(hud) = hud_slot.as_ref() else {
             return;
         };
 
-        let frame = hud_frame(bounds, progress);
-        hud.glass.as_super().setFrame(frame);
+        let layout = hud_layout(bounds, if settled { 1.0 } else { 0.0 });
+        hud.glass.as_super().setFrame(layout.glass_frame);
         hud.glass.as_super().setAlphaValue(1.0);
-
         let content_bounds = hud.glass.as_super().bounds();
         hud.content.setFrame(content_bounds);
 
-        let pad_x = lerp(
-            config::hud::LAUNCH_PADDING_X,
-            config::hud::SETTLED_PADDING_X,
-            progress,
-        );
-        let icon_size = lerp(22.0, 18.0, progress);
-        let gap = lerp(config::hud::LAUNCH_GAP, config::hud::SETTLED_GAP, progress);
-        let hint_width = lerp(
-            config::hud::LAUNCH_HINT_WIDTH,
-            config::hud::SETTLED_HINT_WIDTH,
-            progress,
-        );
-        let content_height = content_bounds.size.height;
-        let baseline_y = ((content_height - 18.0) * 0.5).round();
-
-        let mut text_x = pad_x;
         if let Some(icon) = &hud.icon {
-            let icon_y = ((content_height - icon_size) * 0.5).round();
-            icon.as_super().as_super().setFrame(NSRect {
-                origin: NSPoint {
-                    x: pad_x.round(),
-                    y: icon_y,
-                },
-                size: NSSize {
-                    width: icon_size,
-                    height: icon_size,
-                },
-            });
-            text_x += icon_size + gap;
+            if let Some(icon_frame) = layout.icon_frame {
+                icon.as_super().as_super().setFrame(icon_frame);
+            }
         }
 
-        hud.hint.as_super().as_super().setFrame(NSRect {
-            origin: NSPoint {
-                x: (content_bounds.size.width - pad_x - hint_width).round(),
-                y: baseline_y,
-            },
-            size: NSSize {
-                width: hint_width,
-                height: 18.0,
-            },
-        });
+        hud.hint.as_super().as_super().setFrame(layout.hint_frame);
         let title_view = hud.title.as_super().as_super();
-        if progress > 0.0 {
-            if title_view.isDescendantOf(&hud.content) {
-                title_view.removeFromSuperview();
+        if !title_view.isDescendantOf(&hud.content) {
+            hud.content.addSubview(title_view);
+        }
+        title_view.setHidden(settled);
+        title_view.setAlphaValue(layout.title_alpha);
+        title_view.setFrame(layout.title_frame);
+    });
+}
+
+fn animate_hud_to_settled() {
+    let hud = HUD.with(|slot| {
+        let mut hud_slot = slot.borrow_mut();
+        let hud = hud_slot.as_mut()?;
+        if hud.settled {
+            return None;
+        }
+        hud.settled = true;
+        Some((
+            hud.glass.clone(),
+            hud.icon.clone(),
+            hud.title.clone(),
+            hud.hint.clone(),
+        ))
+    });
+    let Some((glass, icon, title, hint)) = hud else {
+        return;
+    };
+
+    let bounds = unsafe { glass.as_super().superview() }
+        .map(|view| view.bounds())
+        .unwrap_or_else(|| glass.as_super().frame());
+    let layout = hud_layout(bounds, 1.0);
+    title.as_super().as_super().setHidden(false);
+    title.as_super().as_super().setAlphaValue(1.0);
+
+    let title_for_layout = title.clone();
+    let title_for_fade = title.clone();
+    let changes = block2::RcBlock::new(move |ctx: core::ptr::NonNull<NSAnimationContext>| {
+        let ctx = unsafe { ctx.as_ref() };
+        ctx.setDuration(config::hud::ANIMATION_DURATION_SECS);
+        ctx.setAllowsImplicitAnimation(true);
+
+        glass.animator().as_super().setFrame(layout.glass_frame);
+        if let Some(icon) = &icon {
+            if let Some(icon_frame) = layout.icon_frame {
+                icon.animator().as_super().as_super().setFrame(icon_frame);
             }
-        } else {
-            if !title_view.isDescendantOf(&hud.content) {
-                hud.content.addSubview(title_view);
-            }
-            title_view.setFrame(NSRect {
-                origin: NSPoint {
-                    x: text_x.round(),
-                    y: baseline_y,
-                },
-                size: NSSize {
-                    width: (content_bounds.size.width - text_x - hint_width - pad_x - 8.0)
-                        .max(96.0),
-                    height: 18.0,
-                },
-            });
+        }
+        hint.animator()
+            .as_super()
+            .as_super()
+            .setFrame(layout.hint_frame);
+        title_for_layout
+            .animator()
+            .as_super()
+            .as_super()
+            .setFrame(layout.title_frame);
+        title_for_fade
+            .animator()
+            .as_super()
+            .as_super()
+            .setAlphaValue(0.0);
+    });
+    let title_for_hide = title.clone();
+    let completion = block2::RcBlock::new(move || {
+        title_for_hide.as_super().as_super().setHidden(true);
+    });
+    NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&completion));
+}
+
+fn clear_hud_timer() {
+    HUD_ANIMATION_TIMER.with(|slot| {
+        if let Some(timer) = slot.borrow_mut().take() {
+            timer.invalidate();
         }
     });
 }
 
+fn schedule_hud_settle() {
+    clear_hud_timer();
+    let block = block2::RcBlock::new(move |_timer: core::ptr::NonNull<NSTimer>| {
+        clear_hud_timer();
+        animate_hud_to_settled();
+    });
+    let timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            config::hud::ANIMATION_DELAY_SECS,
+            false,
+            &block,
+        )
+    };
+    HUD_ANIMATION_TIMER.with(|slot| {
+        *slot.borrow_mut() = Some(timer);
+    });
+}
+
 fn clear_hud() {
+    clear_hud_timer();
     HUD.with(|slot| {
         if let Some(hud) = slot.borrow_mut().take() {
             hud.glass.as_super().removeFromSuperview();
@@ -487,9 +606,9 @@ fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
             }
         }
     });
-    ANIMATION_TIMER.with(|c| {
-        if let Some(timer) = c.borrow_mut().take() {
-            timer.invalidate();
+    DISPLAY_LINK.with(|c| {
+        if let Some(display_link) = c.borrow_mut().take() {
+            display_link.invalidate();
         }
     });
     NSCursor::unhide();
@@ -540,23 +659,17 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _rect: NSRect) {
-            let mut hud_progress = 1.0;
             SESSION.with(|c| {
-                let mut b = c.borrow_mut();
-                let Some(st) = b.as_mut() else {
+                let b = c.borrow();
+                let Some(st) = b.as_ref() else {
                     return;
                 };
-                let bounds = self.bounds();
-                st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
-                let _ = update_flashlight_animation(st);
-                let _ = update_fade_in_animation(st);
-                let _ = update_hud_animation(st);
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
                     return;
                 };
+                let bounds = self.bounds();
                 let cg_ctx = ns_ctx.CGContext();
                 let zoom = st.zoom.clamp(config::zoom::MIN, config::zoom::MAX);
-                hud_progress = st.hud_progress.clamp(0.0, 1.0);
                 let pointer = CGPoint {
                     x: st.pointer_view.x as _,
                     y: st.pointer_view.y as _,
@@ -577,7 +690,21 @@ define_class!(
                     st.fade_in_progress,
                 );
             });
-            sync_hud_layout(self.bounds(), ease_in_out(hud_progress));
+        }
+
+        #[unsafe(method(stepAnimation:))]
+        fn step_animation(&self, display_link: &CADisplayLink) {
+            let frame_timestamp = display_link.targetTimestamp();
+            let fallback_delta_secs = (display_link.targetTimestamp() - display_link.timestamp())
+                .clamp(0.0, 0.25);
+            let animating = with_session_mut(|st| {
+                step_overlay_animations(st, frame_timestamp, fallback_delta_secs)
+            })
+            .unwrap_or(false);
+            self.setNeedsDisplay(true);
+            if !animating {
+                pause_display_link();
+            }
         }
     }
 
@@ -586,37 +713,34 @@ define_class!(
 
 thread_local! {
     static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
-    static ANIMATION_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+    static DISPLAY_LINK: RefCell<Option<Retained<CADisplayLink>>> = const { RefCell::new(None) };
+    static HUD_ANIMATION_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
 }
 
-fn ensure_animation_timer(view: Retained<CoomerView>) {
-    ANIMATION_TIMER.with(|c| {
-        if c.borrow().as_ref().is_some_and(|timer| timer.isValid()) {
+fn pause_display_link() {
+    DISPLAY_LINK.with(|c| {
+        if let Some(display_link) = c.borrow().as_ref() {
+            display_link.setPaused(true);
+        }
+    });
+}
+
+fn ensure_display_link(view: &CoomerView) {
+    DISPLAY_LINK.with(|c| {
+        if let Some(display_link) = c.borrow().as_ref() {
+            display_link.setPaused(false);
             return;
         }
 
-        let view_for_timer = view.clone();
-        let block = block2::RcBlock::new(move |timer: core::ptr::NonNull<NSTimer>| {
-            let animating_flashlight =
-                with_session_mut(update_flashlight_animation).unwrap_or(false);
-            let animating_fade_in = with_session_mut(update_fade_in_animation).unwrap_or(false);
-            let animating_hud = with_session_mut(update_hud_animation).unwrap_or(false);
-            view_for_timer.setNeedsDisplay(true);
-            if !animating_flashlight && !animating_fade_in && !animating_hud {
-                unsafe { timer.as_ref() }.invalidate();
-                ANIMATION_TIMER.with(|c| {
-                    c.borrow_mut().take();
-                });
-            }
-        });
-        let timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                config::flashlight::TIMER_INTERVAL_SECS,
-                true,
-                &block,
-            )
+        let display_link = unsafe {
+            view.as_super()
+                .displayLinkWithTarget_selector(view.as_super(), sel!(stepAnimation:))
         };
-        *c.borrow_mut() = Some(timer);
+        display_link.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
+        unsafe {
+            display_link.addToRunLoop_forMode(&NSRunLoop::currentRunLoop(), NSRunLoopCommonModes);
+        }
+        *c.borrow_mut() = Some(display_link);
     });
 }
 
@@ -667,8 +791,7 @@ pub fn spawn_window(
     w.setContentView(Some(v));
     create_hud(mtm, &view);
     w.makeFirstResponder(Some(v));
-    sync_hud_layout(v.bounds(), 0.0);
-    ensure_animation_timer(view.clone());
+    ensure_display_link(&view);
     Ok((window, view))
 }
 
@@ -693,7 +816,7 @@ pub fn install_local_monitor(
                     with_session_mut(|st| {
                         start_flashlight_animation(st, !st.flashlight_enabled);
                     });
-                    ensure_animation_timer(view.clone());
+                    ensure_display_link(&view);
                     view.setNeedsDisplay(true);
                     return core::ptr::null_mut();
                 }

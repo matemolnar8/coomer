@@ -17,6 +17,11 @@ objc2-core-graphics = { version = "0.3.2", features = [
     "CGImage",
     "objc2",
 ] }
+objc2-quartz-core = { version = "0.3.2", features = [
+    "CADisplayLink",
+    "CAFrameRateRange",
+    "CAMediaTimingFunction",
+] }
 objc2-foundation = { version = "0.3.2", features = [
     "NSArray",
     "NSDate",
