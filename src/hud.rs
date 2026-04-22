@@ -1,8 +1,8 @@
 use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadOnly};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSColor,
-    NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSTextField, NSView,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSColor, NSFont,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSTextField, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
@@ -47,14 +47,22 @@ thread_local! {
     static HUD_ANIMATION_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
 }
 
-fn lerp(start: f64, end: f64, t: f64) -> f64 {
-    start + (end - start) * t
-}
-
-fn hud_layout(bounds: NSRect, progress: f64) -> HudLayout {
-    let width = lerp(config::LAUNCH_WIDTH, config::SETTLED_WIDTH, progress);
-    let height = lerp(config::LAUNCH_HEIGHT, config::SETTLED_HEIGHT, progress);
-    let top_margin = lerp(config::TOP_MARGIN_LAUNCH, config::TOP_MARGIN_SETTLED, progress);
+fn hud_layout(bounds: NSRect, settled: bool) -> HudLayout {
+    let width = if settled {
+        config::SETTLED_WIDTH
+    } else {
+        config::LAUNCH_WIDTH
+    };
+    let height = if settled {
+        config::SETTLED_HEIGHT
+    } else {
+        config::LAUNCH_HEIGHT
+    };
+    let top_margin = if settled {
+        config::TOP_MARGIN_SETTLED
+    } else {
+        config::TOP_MARGIN_LAUNCH
+    };
     let glass_frame = NSRect {
         origin: NSPoint {
             x: ((bounds.size.width - width) * 0.5).round(),
@@ -66,10 +74,22 @@ fn hud_layout(bounds: NSRect, progress: f64) -> HudLayout {
         origin: NSPoint { x: 0.0, y: 0.0 },
         size: glass_frame.size,
     };
-    let pad_x = lerp(config::LAUNCH_PADDING_X, config::SETTLED_PADDING_X, progress);
-    let icon_size = lerp(22.0, 18.0, progress);
-    let gap = lerp(config::LAUNCH_GAP, config::SETTLED_GAP, progress);
-    let hint_width = lerp(config::LAUNCH_HINT_WIDTH, config::SETTLED_HINT_WIDTH, progress);
+    let pad_x = if settled {
+        config::SETTLED_PADDING_X
+    } else {
+        config::LAUNCH_PADDING_X
+    };
+    let icon_size = if settled { 18.0 } else { 22.0 };
+    let gap = if settled {
+        config::SETTLED_GAP
+    } else {
+        config::LAUNCH_GAP
+    };
+    let hint_width = if settled {
+        config::SETTLED_HINT_WIDTH
+    } else {
+        config::LAUNCH_HINT_WIDTH
+    };
     let baseline_y = ((content_bounds.size.height - 18.0) * 0.5).round();
     let mut text_x = pad_x;
     let icon_frame = Some(NSRect {
@@ -110,7 +130,7 @@ fn hud_layout(bounds: NSRect, progress: f64) -> HudLayout {
         icon_frame,
         title_frame,
         hint_frame,
-        title_alpha: 1.0 - progress,
+        title_alpha: if settled { 0.0 } else { 1.0 },
     }
 }
 
@@ -143,7 +163,7 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView) {
     let bounds = host_view.bounds();
     let glass = NSGlassEffectView::initWithFrame(
         NSGlassEffectView::alloc(mtm),
-        hud_layout(bounds, 0.0).glass_frame,
+        hud_layout(bounds, false).glass_frame,
     );
     glass.setStyle(NSGlassEffectViewStyle::Regular);
     glass.setCornerRadius(config::CORNER_RADIUS);
@@ -172,7 +192,7 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView) {
     })
     .map(|image| {
         let view = NSImageView::imageViewWithImage(&image, mtm);
-        view.setContentTintColor(Some(&NSColor::systemBlueColor()));
+        view.setContentTintColor(Some(&NSColor::controlAccentColor()));
         view
     });
 
@@ -210,7 +230,7 @@ fn apply_layout(bounds: NSRect, settled: bool) {
             return;
         };
 
-        let layout = hud_layout(bounds, if settled { 1.0 } else { 0.0 });
+        let layout = hud_layout(bounds, settled);
         hud.glass.as_super().setFrame(layout.glass_frame);
         hud.glass.as_super().setAlphaValue(1.0);
         let content_bounds = hud.glass.as_super().bounds();
@@ -255,7 +275,7 @@ fn animate_to_settled() {
     let bounds = unsafe { glass.as_super().superview() }
         .map(|view| view.bounds())
         .unwrap_or_else(|| glass.as_super().frame());
-    let layout = hud_layout(bounds, 1.0);
+    let layout = hud_layout(bounds, true);
     title.as_super().as_super().setHidden(false);
     title.as_super().as_super().setAlphaValue(1.0);
 
