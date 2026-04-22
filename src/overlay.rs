@@ -49,6 +49,7 @@ mod config {
         pub const SETTLED_WIDTH: f64 = 144.0;
         pub const LAUNCH_HEIGHT: f64 = 58.0;
         pub const SETTLED_HEIGHT: f64 = 46.0;
+        pub const CORNER_RADIUS: f64 = SETTLED_HEIGHT / 2.0;
         pub const TOP_MARGIN_LAUNCH: f64 = 20.0;
         pub const TOP_MARGIN_SETTLED: f64 = 14.0;
         pub const LAUNCH_PADDING_X: f64 = 20.0;
@@ -414,8 +415,8 @@ fn create_hud(mtm: MainThreadMarker, host_view: &CoomerView) {
         NSGlassEffectView::alloc(mtm),
         hud_layout(bounds, 0.0).glass_frame,
     );
-    glass.setStyle(NSGlassEffectViewStyle::Clear);
-    glass.setCornerRadius(23.0);
+    glass.setStyle(NSGlassEffectViewStyle::Regular);
+    glass.setCornerRadius(config::hud::CORNER_RADIUS);
     glass.setTintColor(None);
     glass.as_super().setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewMinXMargin
