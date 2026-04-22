@@ -401,7 +401,7 @@ fn ensure_display_link(view: &CoomerView) {
 
 pub fn spawn_window(
     mtm: MainThreadMarker,
-    _screen: &NSScreen,
+    screen: &NSScreen,
     window_frame: NSRect,
 ) -> Result<(Retained<CoomerWindow>, Retained<CoomerView>), String> {
     let this = CoomerWindow::alloc(mtm).set_ivars(());
@@ -444,7 +444,7 @@ pub fn spawn_window(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
     w.setContentView(Some(v));
-    hud::mount(mtm, v);
+    hud::mount(mtm, v, screen);
     w.makeFirstResponder(Some(v));
     ensure_display_link(&view);
     Ok((window, view))

@@ -2,9 +2,11 @@ use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadOnly};
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSColor, NSFont,
-    NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSTextField, NSView,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSScreen, NSTextField, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSTimer};
+use objc2_foundation::{
+    MainThreadMarker, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString, NSTimer,
+};
 use std::cell::RefCell;
 
 mod config {
@@ -23,6 +25,7 @@ mod config {
     pub(super) const SETTLED_GAP: f64 = 8.0;
     pub(super) const LAUNCH_HINT_WIDTH: f64 = 86.0;
     pub(super) const SETTLED_HINT_WIDTH: f64 = 80.0;
+    pub(super) const NOTCH_CLEARANCE: f64 = 6.0;
 }
 
 struct OverlayHud {
@@ -32,6 +35,7 @@ struct OverlayHud {
     title: Retained<NSTextField>,
     hint: Retained<NSTextField>,
     settled: bool,
+    notch_top_offset: f64,
 }
 
 struct HudLayout {
@@ -47,7 +51,28 @@ thread_local! {
     static HUD_ANIMATION_TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
 }
 
-fn hud_layout(bounds: NSRect, settled: bool) -> HudLayout {
+fn notch_top_offset(screen: &NSScreen, launch_top_margin: f64) -> f64 {
+    let left = screen.auxiliaryTopLeftArea();
+    let right = screen.auxiliaryTopRightArea();
+    let notch_width = right.origin.x - (left.origin.x + left.size.width);
+    if notch_width <= 1.0 {
+        return 0.0;
+    }
+
+    let frame = screen.frame();
+    let screen_top = frame.origin.y + frame.size.height;
+    let notch_bottom = left.origin.y.min(right.origin.y);
+    let notch_depth = (screen_top - notch_bottom).max(0.0);
+
+    (notch_depth + config::NOTCH_CLEARANCE - launch_top_margin).max(0.0)
+}
+
+fn fallback_notch_offset(screen: &NSScreen, launch_top_margin: f64) -> f64 {
+    let NSEdgeInsets { top, .. } = screen.safeAreaInsets();
+    (top + config::NOTCH_CLEARANCE - launch_top_margin).max(0.0)
+}
+
+fn hud_layout(bounds: NSRect, settled: bool, notch_top_offset: f64) -> HudLayout {
     let width = if settled {
         config::SETTLED_WIDTH
     } else {
@@ -62,7 +87,7 @@ fn hud_layout(bounds: NSRect, settled: bool) -> HudLayout {
         config::TOP_MARGIN_SETTLED
     } else {
         config::TOP_MARGIN_LAUNCH
-    };
+    } + notch_top_offset;
     let glass_frame = NSRect {
         origin: NSPoint {
             x: ((bounds.size.width - width) * 0.5).round(),
@@ -157,13 +182,19 @@ fn make_hud_label(
     label
 }
 
-pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView) {
+pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView, screen: &NSScreen) {
     clear();
 
     let bounds = host_view.bounds();
+    let notch_offset = notch_top_offset(screen, config::TOP_MARGIN_LAUNCH);
+    let notch_offset = if notch_offset > 0.0 {
+        notch_offset
+    } else {
+        fallback_notch_offset(screen, config::TOP_MARGIN_LAUNCH)
+    };
     let glass = NSGlassEffectView::initWithFrame(
         NSGlassEffectView::alloc(mtm),
-        hud_layout(bounds, false).glass_frame,
+        hud_layout(bounds, false, notch_offset).glass_frame,
     );
     glass.setStyle(NSGlassEffectViewStyle::Regular);
     glass.setCornerRadius(config::CORNER_RADIUS);
@@ -216,6 +247,7 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView) {
             title,
             hint,
             settled: false,
+            notch_top_offset: notch_offset,
         });
     });
 
@@ -230,7 +262,7 @@ fn apply_layout(bounds: NSRect, settled: bool) {
             return;
         };
 
-        let layout = hud_layout(bounds, settled);
+        let layout = hud_layout(bounds, settled, hud.notch_top_offset);
         hud.glass.as_super().setFrame(layout.glass_frame);
         hud.glass.as_super().setAlphaValue(1.0);
         let content_bounds = hud.glass.as_super().bounds();
@@ -275,7 +307,13 @@ fn animate_to_settled() {
     let bounds = unsafe { glass.as_super().superview() }
         .map(|view| view.bounds())
         .unwrap_or_else(|| glass.as_super().frame());
-    let layout = hud_layout(bounds, true);
+    let notch_top_offset = HUD.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|hud| hud.notch_top_offset)
+            .unwrap_or(0.0)
+    });
+    let layout = hud_layout(bounds, true, notch_top_offset);
     title.as_super().as_super().setHidden(false);
     title.as_super().as_super().setAlphaValue(1.0);
 
