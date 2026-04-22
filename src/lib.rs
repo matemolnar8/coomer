@@ -7,6 +7,8 @@ mod app;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
+mod hud;
+#[cfg(target_os = "macos")]
 mod input;
 #[cfg(target_os = "macos")]
 mod overlay;
