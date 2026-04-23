@@ -1,18 +1,18 @@
 use core_graphics::image::CGImage;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol};
+use objc2::runtime::NSObjectProtocol;
 use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor, NSEvent,
-    NSEventModifierFlags, NSEventType, NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor,
+    NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel, NSView,
+    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use std::cell::RefCell;
 
-use crate::{hud, render};
+use crate::{hud, input, render};
 
 mod config {
     pub(super) mod zoom {
@@ -38,14 +38,6 @@ mod config {
         pub const DURATION_SECS: f64 = 0.8;
     }
 
-    pub(super) mod key {
-        pub const FLASHLIGHT_TOGGLE: u16 = 3;
-        pub const QUIT: u16 = 12;
-        pub const ZOOM_IN: u16 = 24;
-        pub const ZOOM_OUT: u16 = 27;
-        pub const RESET: u16 = 29;
-        pub const ESCAPE: u16 = 53;
-    }
 }
 
 pub const DEFAULT_ZOOM: f64 = config::zoom::DEFAULT;
@@ -242,11 +234,6 @@ fn zoom_keyboard_anchored(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, 
     anchor_zoom_to_cursor(st, bounds, px, py, new_zoom);
 }
 
-fn event_point_in_view(ev: &NSEvent, view: &CoomerView) -> NSPoint {
-    view.as_super()
-        .convertPoint_fromView(ev.locationInWindow(), None)
-}
-
 fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
     NSPoint {
         x: to.x - from.x,
@@ -255,13 +242,7 @@ fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
 }
 
 fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
-    MONITOR.with(|c| {
-        if let Some(m) = c.borrow_mut().take() {
-            unsafe {
-                NSEvent::removeMonitor(&m);
-            }
-        }
-    });
+    input::remove_overlay_monitor();
     DISPLAY_LINK.with(|c| {
         if let Some(display_link) = c.borrow_mut().take() {
             display_link.invalidate();
@@ -368,7 +349,6 @@ define_class!(
 );
 
 thread_local! {
-    static MONITOR: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
     static DISPLAY_LINK: RefCell<Option<Retained<CADisplayLink>>> = const { RefCell::new(None) };
 }
 
@@ -450,158 +430,148 @@ pub fn spawn_window(
     Ok((window, view))
 }
 
-pub fn install_local_monitor(
+pub fn retained_content_ns_view(view: &Retained<CoomerView>) -> Retained<NSView> {
+    view.clone().into_super()
+}
+
+pub struct OverlayInputSink {
     mtm: MainThreadMarker,
-    view: Retained<CoomerView>,
     window: Retained<CoomerWindow>,
-) -> Retained<AnyObject> {
-    let mask = crate::input::local_monitor_mask();
-    let mtm_for = mtm;
-    let block = block2::RcBlock::new(move |event: core::ptr::NonNull<NSEvent>| -> *mut NSEvent {
-        let ev = unsafe { event.as_ref() };
-        let ty = ev.r#type();
+    view: Retained<CoomerView>,
+}
 
-        if ty == NSEventType::KeyDown {
-            match ev.keyCode() {
-                config::key::QUIT | config::key::ESCAPE => {
-                    stop_overlay(mtm_for, &window);
-                    return core::ptr::null_mut();
-                }
-                config::key::FLASHLIGHT_TOGGLE => {
-                    with_session_mut(|st| {
-                        start_flashlight_animation(st, !st.flashlight_enabled);
-                    });
-                    ensure_display_link(&view);
-                    view.setNeedsDisplay(true);
-                    return core::ptr::null_mut();
-                }
-                config::key::RESET => {
-                    let pointer = event_point_in_view(ev, &view);
-                    with_session_mut(|st| {
-                        reset_state(st);
-                        st.pointer_view = pointer;
-                    });
-                    view.setNeedsDisplay(true);
-                    return core::ptr::null_mut();
-                }
-                config::key::ZOOM_IN => {
-                    let bounds = view.as_super().bounds();
-                    with_session_mut(|st| {
-                        let p = st.pointer_view;
-                        zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
-                    });
-                    view.setNeedsDisplay(true);
-                    return core::ptr::null_mut();
-                }
-                config::key::ZOOM_OUT => {
-                    let bounds = view.as_super().bounds();
-                    with_session_mut(|st| {
-                        let p = st.pointer_view;
-                        zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
-                    });
-                    view.setNeedsDisplay(true);
-                    return core::ptr::null_mut();
-                }
-                _ => {}
+impl OverlayInputSink {
+    pub fn new(
+        mtm: MainThreadMarker,
+        window: Retained<CoomerWindow>,
+        view: Retained<CoomerView>,
+    ) -> Self {
+        Self { mtm, window, view }
+    }
+}
+
+impl input::OverlayIntentSink for OverlayInputSink {
+    fn handle(&mut self, intent: input::OverlayIntent) -> input::IntentResult {
+        use input::{IntentResult, OverlayIntent};
+        match intent {
+            OverlayIntent::Quit => {
+                stop_overlay(self.mtm, &self.window);
+                IntentResult::StopOverlay
             }
-            return core::ptr::null_mut();
-        }
-
-        if ty == NSEventType::KeyUp {
-            return core::ptr::null_mut();
-        }
-
-        if ty == NSEventType::ScrollWheel {
-            let dy = ev.scrollingDeltaY();
-            if dy == 0.0 {
-                return event.as_ptr();
+            OverlayIntent::ToggleFlashlight => {
+                with_session_mut(|st| {
+                    start_flashlight_animation(st, !st.flashlight_enabled);
+                });
+                ensure_display_link(&self.view);
+                self.view.setNeedsDisplay(true);
+                IntentResult::Consume
             }
-            let point = event_point_in_view(ev, &view);
-            let precise = ev.hasPreciseScrollingDeltas();
-            let bounds = view.as_super().bounds();
-            with_session_mut(|st| {
-                st.pointer_view = point;
-                let cmd = ev.modifierFlags().contains(NSEventModifierFlags::Command);
-                if cmd && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
-                    let k = if precise {
-                        config::flashlight::SCROLL_FACTOR_PRECISE
+            OverlayIntent::Reset { pointer_view } => {
+                with_session_mut(|st| {
+                    reset_state(st);
+                    st.pointer_view = pointer_view;
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::Consume
+            }
+            OverlayIntent::ZoomIn => {
+                let bounds = self.view.as_super().bounds();
+                with_session_mut(|st| {
+                    let p = st.pointer_view;
+                    zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::Consume
+            }
+            OverlayIntent::ZoomOut => {
+                let bounds = self.view.as_super().bounds();
+                with_session_mut(|st| {
+                    let p = st.pointer_view;
+                    zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::Consume
+            }
+            OverlayIntent::ScrollWheel {
+                pointer_view,
+                dy,
+                precise,
+                command,
+            } => {
+                let bounds = self.view.as_super().bounds();
+                with_session_mut(|st| {
+                    st.pointer_view = pointer_view;
+                    if command && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
+                        let k = if precise {
+                            config::flashlight::SCROLL_FACTOR_PRECISE
+                        } else {
+                            config::flashlight::SCROLL_FACTOR_LINE
+                        };
+                        st.flashlight_radius = (st.flashlight_radius + dy * k).clamp(
+                            config::flashlight::MIN_RADIUS,
+                            config::flashlight::MAX_RADIUS,
+                        );
                     } else {
-                        config::flashlight::SCROLL_FACTOR_LINE
-                    };
-                    st.flashlight_radius = (st.flashlight_radius + dy * k).clamp(
-                        config::flashlight::MIN_RADIUS,
-                        config::flashlight::MAX_RADIUS,
-                    );
-                } else {
-                    let line_factor = 1.0 + dy * config::zoom::SCROLL_FACTOR_LINE;
-                    let factor = if precise {
-                        1.0 + dy * config::zoom::SCROLL_FACTOR_PRECISE
-                    } else {
-                        line_factor
-                    };
-                    let new_zoom = (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
-                    anchor_zoom_to_cursor(st, bounds, point.x, point.y, new_zoom);
-                }
-            });
-            view.setNeedsDisplay(true);
-            return event.as_ptr();
-        }
-
-        if ty == NSEventType::LeftMouseDown {
-            let point = event_point_in_view(ev, &view);
-            with_session_mut(|st| {
-                st.pointer_view = point;
-                st.drag_anchor_view = Some(point);
-            });
-            view.setNeedsDisplay(true);
-            return event.as_ptr();
-        }
-
-        if ty == NSEventType::LeftMouseDragged {
-            let point = event_point_in_view(ev, &view);
-            let bounds = view.as_super().bounds();
-            with_session_mut(|st| {
-                if let Some(anchor) = st.drag_anchor_view {
-                    if st.zoom > 1.0 + config::zoom::EPSILON {
-                        let d = point_delta(anchor, point);
-                        st.image_origin.x += d.x;
-                        st.image_origin.y += d.y;
-                        st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+                        let line_factor = 1.0 + dy * config::zoom::SCROLL_FACTOR_LINE;
+                        let factor = if precise {
+                            1.0 + dy * config::zoom::SCROLL_FACTOR_PRECISE
+                        } else {
+                            line_factor
+                        };
+                        let new_zoom =
+                            (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
+                        anchor_zoom_to_cursor(
+                            st,
+                            bounds,
+                            pointer_view.x,
+                            pointer_view.y,
+                            new_zoom,
+                        );
                     }
-                    st.drag_anchor_view = Some(point);
-                }
-                st.pointer_view = point;
-            });
-            view.setNeedsDisplay(true);
-            return event.as_ptr();
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::PassThrough
+            }
+            OverlayIntent::LeftMouseDown { pointer_view } => {
+                with_session_mut(|st| {
+                    st.pointer_view = pointer_view;
+                    st.drag_anchor_view = Some(pointer_view);
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::PassThrough
+            }
+            OverlayIntent::LeftMouseDragged { pointer_view } => {
+                let bounds = self.view.as_super().bounds();
+                with_session_mut(|st| {
+                    if let Some(anchor) = st.drag_anchor_view {
+                        if st.zoom > 1.0 + config::zoom::EPSILON {
+                            let d = point_delta(anchor, pointer_view);
+                            st.image_origin.x += d.x;
+                            st.image_origin.y += d.y;
+                            st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
+                        }
+                        st.drag_anchor_view = Some(pointer_view);
+                    }
+                    st.pointer_view = pointer_view;
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::PassThrough
+            }
+            OverlayIntent::LeftMouseUp { pointer_view } => {
+                with_session_mut(|st| {
+                    st.pointer_view = pointer_view;
+                    st.drag_anchor_view = None;
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::PassThrough
+            }
+            OverlayIntent::PointerMoved { pointer_view } => {
+                with_session_mut(|st| {
+                    st.pointer_view = pointer_view;
+                });
+                self.view.setNeedsDisplay(true);
+                IntentResult::PassThrough
+            }
         }
-
-        if ty == NSEventType::LeftMouseUp {
-            let point = event_point_in_view(ev, &view);
-            with_session_mut(|st| {
-                st.pointer_view = point;
-                st.drag_anchor_view = None;
-            });
-            view.setNeedsDisplay(true);
-            return event.as_ptr();
-        }
-
-        if ty == NSEventType::MouseMoved {
-            let point = event_point_in_view(ev, &view);
-            with_session_mut(|st| {
-                st.pointer_view = point;
-            });
-            view.setNeedsDisplay(true);
-            return event.as_ptr();
-        }
-
-        event.as_ptr()
-    });
-
-    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
-        .expect("addLocalMonitorForEventsMatchingMask");
-    MONITOR.with(|c| {
-        *c.borrow_mut() = Some(monitor.clone());
-    });
-    monitor
+    }
 }

@@ -1,5 +1,6 @@
 use crate::capture;
-use crate::overlay::{self, DrawState};
+use crate::input;
+use crate::overlay::{self, DrawState, OverlayInputSink};
 use crate::permissions;
 use objc2::ClassType;
 use objc2_app_kit::NSApplication;
@@ -81,7 +82,9 @@ pub fn run() -> Result<(), String> {
         });
     }
 
-    let _monitor = overlay::install_local_monitor(mtm, view.clone(), window.clone());
+    let view_ns = overlay::retained_content_ns_view(&view);
+    let sink = OverlayInputSink::new(mtm, window.clone(), view.clone());
+    let _monitor = input::install_overlay_monitor(mtm, view_ns, sink);
 
     #[allow(deprecated)]
     {
