@@ -2,7 +2,6 @@ use crate::capture;
 use crate::input;
 use crate::overlay::{self, DrawState, OverlayInputSink};
 use crate::permissions;
-use objc2::ClassType;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::path::PathBuf;
@@ -75,8 +74,8 @@ pub fn run() -> Result<(), String> {
     let (window, view) = overlay::spawn_window(mtm, &cap.screen, cap.window_frame)?;
 
     {
-        let wp = window.as_super().convertPointFromScreen(mouse);
-        let vp = view.as_super().convertPoint_fromView(wp, None);
+        let wp = window.convertPointFromScreen(mouse);
+        let vp = view.convertPoint_fromView(wp, None);
         overlay::with_session_mut(|st| {
             st.pointer_view = vp;
         });
@@ -90,8 +89,8 @@ pub fn run() -> Result<(), String> {
     {
         app.activateIgnoringOtherApps(true);
     }
-    window.as_super().makeKeyAndOrderFront(None);
-    let _ = window.as_super().makeFirstResponder(Some(&*view));
+    window.makeKeyAndOrderFront(None);
+    let _ = window.makeFirstResponder(Some(&*view));
     view.setNeedsDisplay(true);
 
     app.run();

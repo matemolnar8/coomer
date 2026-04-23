@@ -1,7 +1,7 @@
 use core_graphics::image::CGImage;
 use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
-use objc2::{ClassType, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor,
     NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel, NSView,
@@ -252,7 +252,7 @@ fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
     hud::clear();
     clear_session();
     let app = NSApplication::sharedApplication(mtm);
-    window.as_super().orderOut(None);
+    window.orderOut(None);
     app.stop(None);
 }
 
@@ -368,8 +368,7 @@ fn ensure_display_link(view: &CoomerView) {
         }
 
         let display_link = unsafe {
-            view.as_super()
-                .displayLinkWithTarget_selector(view.as_super(), sel!(stepAnimation:))
+            view.displayLinkWithTarget_selector(view, sel!(stepAnimation:))
         };
         display_link.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
         unsafe {
@@ -396,17 +395,16 @@ pub fn spawn_window(
     };
     let window = window.ok_or("initWithContentRect failed for CoomerWindow")?;
 
-    let w = window.as_super();
-    w.setFrame_display(window_frame, false);
-    w.setLevel(NSScreenSaverWindowLevel);
-    w.setOpaque(false);
-    w.setBackgroundColor(Some(&NSColor::clearColor()));
-    w.setCollectionBehavior(
+    window.setFrame_display(window_frame, false);
+    window.setLevel(NSScreenSaverWindowLevel);
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
-    w.setIgnoresMouseEvents(false);
-    w.setAcceptsMouseMovedEvents(true);
+    window.setIgnoresMouseEvents(false);
+    window.setAcceptsMouseMovedEvents(true);
 
     let content_size = window_frame.size;
     let view_frame = NSRect {
@@ -419,13 +417,12 @@ pub fn spawn_window(
         unsafe { msg_send![super(v_this), initWithFrame: view_frame] };
     let view = view.ok_or("CoomerView init failed")?;
 
-    let v = view.as_super();
-    v.setAutoresizingMask(
+    view.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
-    w.setContentView(Some(v));
-    hud::mount(mtm, v, screen);
-    w.makeFirstResponder(Some(v));
+    window.setContentView(Some(&view));
+    hud::mount(mtm, &view, screen);
+    window.makeFirstResponder(Some(&view));
     ensure_display_link(&view);
     Ok((window, view))
 }
@@ -475,7 +472,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 IntentResult::Consume
             }
             OverlayIntent::ZoomIn => {
-                let bounds = self.view.as_super().bounds();
+                let bounds = self.view.bounds();
                 with_session_mut(|st| {
                     let p = st.pointer_view;
                     zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
@@ -484,7 +481,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 IntentResult::Consume
             }
             OverlayIntent::ZoomOut => {
-                let bounds = self.view.as_super().bounds();
+                let bounds = self.view.bounds();
                 with_session_mut(|st| {
                     let p = st.pointer_view;
                     zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
@@ -498,7 +495,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 precise,
                 command,
             } => {
-                let bounds = self.view.as_super().bounds();
+                let bounds = self.view.bounds();
                 with_session_mut(|st| {
                     st.pointer_view = pointer_view;
                     if command && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
@@ -541,7 +538,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 IntentResult::PassThrough
             }
             OverlayIntent::LeftMouseDragged { pointer_view } => {
-                let bounds = self.view.as_super().bounds();
+                let bounds = self.view.bounds();
                 with_session_mut(|st| {
                     if let Some(anchor) = st.drag_anchor_view {
                         if st.zoom > 1.0 + config::zoom::EPSILON {

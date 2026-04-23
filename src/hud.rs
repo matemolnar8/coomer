@@ -1,5 +1,5 @@
 use objc2::rc::Retained;
-use objc2::{ClassType, MainThreadOnly};
+use objc2::MainThreadOnly;
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSColor, NSFont,
     NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSScreen, NSTextField, NSView,
@@ -176,8 +176,8 @@ fn make_hud_label(
     } else {
         NSColor::secondaryLabelColor()
     };
-    label.as_super().setFont(Some(&font));
-    label.as_super().setUsesSingleLineMode(true);
+    label.setFont(Some(&font));
+    label.setUsesSingleLineMode(true);
     label.setTextColor(Some(&text_color));
     label
 }
@@ -199,13 +199,13 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView, screen: &NSScreen
     glass.setStyle(NSGlassEffectViewStyle::Regular);
     glass.setCornerRadius(config::CORNER_RADIUS);
     glass.setTintColor(None);
-    glass.as_super().setAutoresizingMask(
+    glass.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewMinXMargin
             | NSAutoresizingMaskOptions::ViewMaxXMargin
             | NSAutoresizingMaskOptions::ViewMinYMargin,
     );
 
-    let content = NSView::initWithFrame(NSView::alloc(mtm), glass.as_super().bounds());
+    let content = NSView::initWithFrame(NSView::alloc(mtm), glass.bounds());
     content.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
@@ -231,13 +231,13 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView, screen: &NSScreen
     let hint = make_hud_label(mtm, "Esc to close", 12.0, false);
 
     if let Some(icon) = &icon {
-        content.addSubview(icon.as_super().as_super());
+        content.addSubview(icon);
     }
-    content.addSubview(title.as_super().as_super());
-    content.addSubview(hint.as_super().as_super());
+    content.addSubview(&title);
+    content.addSubview(&hint);
 
-    host_view.addSubview(glass.as_super());
-    glass.as_super().setAlphaValue(1.0);
+    host_view.addSubview(&glass);
+    glass.setAlphaValue(1.0);
 
     HUD.with(|slot| {
         *slot.borrow_mut() = Some(OverlayHud {
@@ -263,19 +263,19 @@ fn apply_layout(bounds: NSRect, settled: bool) {
         };
 
         let layout = hud_layout(bounds, settled, hud.notch_top_offset);
-        hud.glass.as_super().setFrame(layout.glass_frame);
-        hud.glass.as_super().setAlphaValue(1.0);
-        let content_bounds = hud.glass.as_super().bounds();
+        hud.glass.setFrame(layout.glass_frame);
+        hud.glass.setAlphaValue(1.0);
+        let content_bounds = hud.glass.bounds();
         hud.content.setFrame(content_bounds);
 
         if let Some(icon) = &hud.icon {
             if let Some(icon_frame) = layout.icon_frame {
-                icon.as_super().as_super().setFrame(icon_frame);
+                icon.setFrame(icon_frame);
             }
         }
 
-        hud.hint.as_super().as_super().setFrame(layout.hint_frame);
-        let title_view = hud.title.as_super().as_super();
+        hud.hint.setFrame(layout.hint_frame);
+        let title_view = &hud.title;
         if !title_view.isDescendantOf(&hud.content) {
             hud.content.addSubview(title_view);
         }
@@ -304,9 +304,9 @@ fn animate_to_settled() {
         return;
     };
 
-    let bounds = unsafe { glass.as_super().superview() }
+    let bounds = unsafe { glass.superview() }
         .map(|view| view.bounds())
-        .unwrap_or_else(|| glass.as_super().frame());
+        .unwrap_or_else(|| glass.frame());
     let notch_top_offset = HUD.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -314,8 +314,8 @@ fn animate_to_settled() {
             .unwrap_or(0.0)
     });
     let layout = hud_layout(bounds, true, notch_top_offset);
-    title.as_super().as_super().setHidden(false);
-    title.as_super().as_super().setAlphaValue(1.0);
+    title.setHidden(false);
+    title.setAlphaValue(1.0);
 
     let title_for_layout = title.clone();
     let title_for_fade = title.clone();
@@ -324,30 +324,19 @@ fn animate_to_settled() {
         ctx.setDuration(config::ANIMATION_DURATION_SECS);
         ctx.setAllowsImplicitAnimation(true);
 
-        glass.animator().as_super().setFrame(layout.glass_frame);
+        glass.animator().setFrame(layout.glass_frame);
         if let Some(icon) = &icon {
             if let Some(icon_frame) = layout.icon_frame {
-                icon.animator().as_super().as_super().setFrame(icon_frame);
+                icon.animator().setFrame(icon_frame);
             }
         }
-        hint.animator()
-            .as_super()
-            .as_super()
-            .setFrame(layout.hint_frame);
-        title_for_layout
-            .animator()
-            .as_super()
-            .as_super()
-            .setFrame(layout.title_frame);
-        title_for_fade
-            .animator()
-            .as_super()
-            .as_super()
-            .setAlphaValue(0.0);
+        hint.animator().setFrame(layout.hint_frame);
+        title_for_layout.animator().setFrame(layout.title_frame);
+        title_for_fade.animator().setAlphaValue(0.0);
     });
     let title_for_hide = title.clone();
     let completion = block2::RcBlock::new(move || {
-        title_for_hide.as_super().as_super().setHidden(true);
+        title_for_hide.setHidden(true);
     });
     NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&completion));
 }
@@ -382,7 +371,7 @@ pub(crate) fn clear() {
     clear_timer();
     HUD.with(|slot| {
         if let Some(hud) = slot.borrow_mut().take() {
-            hud.glass.as_super().removeFromSuperview();
+            hud.glass.removeFromSuperview();
         }
     });
 }
