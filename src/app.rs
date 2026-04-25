@@ -79,6 +79,7 @@ pub fn run() -> Result<(), String> {
         overlay::with_session_mut(|st| {
             st.pointer_view = vp;
         });
+        overlay::refresh_hud_visibility();
     }
 
     let view_ns = overlay::retained_content_ns_view(&view);

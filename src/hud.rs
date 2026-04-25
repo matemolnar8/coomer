@@ -1,8 +1,9 @@
-use objc2::rc::Retained;
 use objc2::MainThreadOnly;
+use objc2::rc::Retained;
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSAutoresizingMaskOptions, NSColor, NSFont,
     NSGlassEffectView, NSGlassEffectViewStyle, NSImage, NSImageView, NSScreen, NSTextField, NSView,
+    NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -12,6 +13,11 @@ use std::cell::RefCell;
 mod config {
     pub(super) const ANIMATION_DELAY_SECS: f64 = 1.0;
     pub(super) const ANIMATION_DURATION_SECS: f64 = 0.6;
+    pub(super) const VISIBILITY_SLIDE_SECS: f64 = 0.16;
+    pub(super) const VISIBILITY_FADE_SECS: f64 = 0.12;
+    pub(super) const FLASHLIGHT_OVERLAP_PADDING: f64 = 6.0;
+    pub(super) const TOP_CORRIDOR_PADDING_X: f64 = 18.0;
+    pub(super) const OFFSCREEN_GAP: f64 = 2.0;
     pub(super) const LAUNCH_WIDTH: f64 = 288.0;
     pub(super) const SETTLED_WIDTH: f64 = 144.0;
     pub(super) const LAUNCH_HEIGHT: f64 = 58.0;
@@ -35,6 +41,8 @@ struct OverlayHud {
     title: Retained<NSTextField>,
     hint: Retained<NSTextField>,
     settled: bool,
+    hidden: bool,
+    reduce_motion: bool,
     notch_top_offset: f64,
 }
 
@@ -70,6 +78,97 @@ fn notch_top_offset(screen: &NSScreen, launch_top_margin: f64) -> f64 {
 fn fallback_notch_offset(screen: &NSScreen, launch_top_margin: f64) -> f64 {
     let NSEdgeInsets { top, .. } = screen.safeAreaInsets();
     (top + config::NOTCH_CLEARANCE - launch_top_margin).max(0.0)
+}
+
+fn point_in_rect(point: NSPoint, rect: NSRect) -> bool {
+    point.x >= rect.origin.x
+        && point.x <= rect.origin.x + rect.size.width
+        && point.y >= rect.origin.y
+        && point.y <= rect.origin.y + rect.size.height
+}
+
+fn expand_rect(rect: NSRect, dx: f64, dy: f64) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: rect.origin.x - dx,
+            y: rect.origin.y - dy,
+        },
+        size: NSSize {
+            width: rect.size.width + dx * 2.0,
+            height: rect.size.height + dy * 2.0,
+        },
+    }
+}
+
+fn circle_intersects_rect(center: NSPoint, radius: f64, rect: NSRect) -> bool {
+    let closest_x = center
+        .x
+        .clamp(rect.origin.x, rect.origin.x + rect.size.width);
+    let closest_y = center
+        .y
+        .clamp(rect.origin.y, rect.origin.y + rect.size.height);
+    let dx = center.x - closest_x;
+    let dy = center.y - closest_y;
+    dx * dx + dy * dy <= radius * radius
+}
+
+fn top_corridor_rect(bounds: NSRect, home_frame: NSRect) -> Option<NSRect> {
+    let top = bounds.origin.y + bounds.size.height;
+    let bottom = home_frame.origin.y + home_frame.size.height;
+    let height = top - bottom;
+    if height <= 0.0 {
+        return None;
+    }
+
+    Some(NSRect {
+        origin: NSPoint {
+            x: home_frame.origin.x - config::TOP_CORRIDOR_PADDING_X,
+            y: bottom,
+        },
+        size: NSSize {
+            width: home_frame.size.width + config::TOP_CORRIDOR_PADDING_X * 2.0,
+            height,
+        },
+    })
+}
+
+fn hidden_frame(bounds: NSRect, home_frame: NSRect) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: home_frame.origin.x,
+            y: (bounds.origin.y + bounds.size.height + config::OFFSCREEN_GAP).round(),
+        },
+        size: home_frame.size,
+    }
+}
+
+fn target_frame(bounds: NSRect, home_frame: NSRect, hidden: bool) -> NSRect {
+    if hidden {
+        hidden_frame(bounds, home_frame)
+    } else {
+        home_frame
+    }
+}
+
+fn presentation_frame(
+    bounds: NSRect,
+    home_frame: NSRect,
+    hidden: bool,
+    reduce_motion: bool,
+) -> NSRect {
+    if reduce_motion {
+        home_frame
+    } else {
+        target_frame(bounds, home_frame, hidden)
+    }
+}
+
+fn presentation_alpha(hidden: bool, reduce_motion: bool) -> f64 {
+    if reduce_motion && hidden { 0.0 } else { 1.0 }
+}
+
+fn reduce_motion_enabled() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
 fn hud_layout(bounds: NSRect, settled: bool, notch_top_offset: f64) -> HudLayout {
@@ -247,6 +346,8 @@ pub(crate) fn mount(mtm: MainThreadMarker, host_view: &NSView, screen: &NSScreen
             title,
             hint,
             settled: false,
+            hidden: false,
+            reduce_motion: reduce_motion_enabled(),
             notch_top_offset: notch_offset,
         });
     });
@@ -263,8 +364,15 @@ fn apply_layout(bounds: NSRect, settled: bool) {
         };
 
         let layout = hud_layout(bounds, settled, hud.notch_top_offset);
-        hud.glass.setFrame(layout.glass_frame);
-        hud.glass.setAlphaValue(1.0);
+        let reduce_motion = reduce_motion_enabled();
+        hud.glass.setFrame(presentation_frame(
+            bounds,
+            layout.glass_frame,
+            hud.hidden,
+            reduce_motion,
+        ));
+        hud.glass
+            .setAlphaValue(presentation_alpha(hud.hidden, reduce_motion));
         let content_bounds = hud.glass.bounds();
         hud.content.setFrame(content_bounds);
 
@@ -285,6 +393,72 @@ fn apply_layout(bounds: NSRect, settled: bool) {
     });
 }
 
+pub(crate) fn update_visibility(
+    pointer_view: NSPoint,
+    flashlight_radius: f64,
+    flashlight_progress: f64,
+) {
+    let Some((glass, target, alpha, reduce_motion)) = HUD.with(|slot| {
+        let mut hud_slot = slot.borrow_mut();
+        let hud = hud_slot.as_mut()?;
+        let bounds = unsafe { hud.glass.superview() }?.bounds();
+        let home_frame = hud_layout(bounds, hud.settled, hud.notch_top_offset).glass_frame;
+        let reduce_motion = reduce_motion_enabled();
+        let hover = point_in_rect(pointer_view, home_frame);
+        let flashlight_visible = flashlight_progress > 0.0;
+        let flashlight_radius =
+            flashlight_radius * (0.9 + 0.1 * flashlight_progress.clamp(0.0, 1.0));
+        let flashlight_overlap = flashlight_visible
+            && circle_intersects_rect(
+                pointer_view,
+                flashlight_radius,
+                expand_rect(
+                    home_frame,
+                    config::FLASHLIGHT_OVERLAP_PADDING,
+                    config::FLASHLIGHT_OVERLAP_PADDING,
+                ),
+            );
+        let in_top_corridor = top_corridor_rect(bounds, home_frame)
+            .map(|rect| point_in_rect(pointer_view, rect))
+            .unwrap_or(false);
+        let hidden = hover || flashlight_overlap || in_top_corridor;
+        if hud.hidden == hidden && hud.reduce_motion == reduce_motion {
+            return None;
+        }
+
+        hud.hidden = hidden;
+        hud.reduce_motion = reduce_motion;
+        Some((
+            hud.glass.clone(),
+            presentation_frame(bounds, home_frame, hidden, reduce_motion),
+            presentation_alpha(hidden, reduce_motion),
+            reduce_motion,
+        ))
+    }) else {
+        return;
+    };
+
+    if reduce_motion {
+        glass.setFrame(target);
+        let changes = block2::RcBlock::new(move |ctx: core::ptr::NonNull<NSAnimationContext>| {
+            let ctx = unsafe { ctx.as_ref() };
+            ctx.setDuration(config::VISIBILITY_FADE_SECS);
+            ctx.setAllowsImplicitAnimation(true);
+            glass.animator().setAlphaValue(alpha);
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+    } else {
+        glass.setAlphaValue(1.0);
+        let changes = block2::RcBlock::new(move |ctx: core::ptr::NonNull<NSAnimationContext>| {
+            let ctx = unsafe { ctx.as_ref() };
+            ctx.setDuration(config::VISIBILITY_SLIDE_SECS);
+            ctx.setAllowsImplicitAnimation(true);
+            glass.animator().setFrame(target);
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+    }
+}
+
 fn animate_to_settled() {
     let hud = HUD.with(|slot| {
         let mut hud_slot = slot.borrow_mut();
@@ -293,14 +467,17 @@ fn animate_to_settled() {
             return None;
         }
         hud.settled = true;
+        hud.reduce_motion = reduce_motion_enabled();
         Some((
             hud.glass.clone(),
             hud.icon.clone(),
             hud.title.clone(),
             hud.hint.clone(),
+            hud.hidden,
+            hud.reduce_motion,
         ))
     });
-    let Some((glass, icon, title, hint)) = hud else {
+    let Some((glass, icon, title, hint, hidden, reduce_motion)) = hud else {
         return;
     };
 
@@ -314,6 +491,8 @@ fn animate_to_settled() {
             .unwrap_or(0.0)
     });
     let layout = hud_layout(bounds, true, notch_top_offset);
+    let glass_frame = presentation_frame(bounds, layout.glass_frame, hidden, reduce_motion);
+    let glass_alpha = presentation_alpha(hidden, reduce_motion);
     title.setHidden(false);
     title.setAlphaValue(1.0);
 
@@ -324,7 +503,8 @@ fn animate_to_settled() {
         ctx.setDuration(config::ANIMATION_DURATION_SECS);
         ctx.setAllowsImplicitAnimation(true);
 
-        glass.animator().setFrame(layout.glass_frame);
+        glass.animator().setFrame(glass_frame);
+        glass.animator().setAlphaValue(glass_alpha);
         if let Some(icon) = &icon {
             if let Some(icon_frame) = layout.icon_frame {
                 icon.animator().setFrame(icon_frame);

@@ -1,9 +1,7 @@
 use core::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags, NSEventMask, NSEventType, NSView,
-};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,7 +29,9 @@ pub fn local_monitor_mask() -> NSEventMask {
 pub enum OverlayIntent {
     Quit,
     ToggleFlashlight,
-    Reset { pointer_view: NSPoint },
+    Reset {
+        pointer_view: NSPoint,
+    },
     ZoomIn,
     ZoomOut,
     ScrollWheel {
@@ -40,10 +40,18 @@ pub enum OverlayIntent {
         precise: bool,
         command: bool,
     },
-    LeftMouseDown { pointer_view: NSPoint },
-    LeftMouseDragged { pointer_view: NSPoint },
-    LeftMouseUp { pointer_view: NSPoint },
-    PointerMoved { pointer_view: NSPoint },
+    LeftMouseDown {
+        pointer_view: NSPoint,
+    },
+    LeftMouseDragged {
+        pointer_view: NSPoint,
+    },
+    LeftMouseUp {
+        pointer_view: NSPoint,
+    },
+    PointerMoved {
+        pointer_view: NSPoint,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,9 +140,7 @@ pub fn install_overlay_monitor<S: OverlayIntentSink + 'static>(
             }
             let point = event_point_in_view(ev, &view_for_block);
             let precise = ev.hasPreciseScrollingDeltas();
-            let command = ev
-                .modifierFlags()
-                .contains(NSEventModifierFlags::Command);
+            let command = ev.modifierFlags().contains(NSEventModifierFlags::Command);
             return match sink.borrow_mut().handle(OverlayIntent::ScrollWheel {
                 pointer_view: point,
                 dy,
@@ -209,7 +215,10 @@ mod tests {
     #[test]
     fn key_down_maps_quit_and_escape() {
         let p = NSPoint { x: 1.0, y: 2.0 };
-        assert_eq!(overlay_intent_for_key_down(key::QUIT, p), Some(OverlayIntent::Quit));
+        assert_eq!(
+            overlay_intent_for_key_down(key::QUIT, p),
+            Some(OverlayIntent::Quit)
+        );
         assert_eq!(
             overlay_intent_for_key_down(key::ESCAPE, p),
             Some(OverlayIntent::Quit)

@@ -4,8 +4,8 @@ use objc2::runtime::NSObjectProtocol;
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSCursor,
-    NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes};
@@ -37,7 +37,6 @@ mod config {
     pub(super) mod fade_in {
         pub const DURATION_SECS: f64 = 0.8;
     }
-
 }
 
 pub const DEFAULT_ZOOM: f64 = config::zoom::DEFAULT;
@@ -241,6 +240,16 @@ fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
     }
 }
 
+pub(crate) fn refresh_hud_visibility() {
+    let _ = with_session_mut(|st| {
+        hud::update_visibility(
+            st.pointer_view,
+            st.flashlight_radius,
+            st.flashlight_progress,
+        );
+    });
+}
+
 fn stop_overlay(mtm: MainThreadMarker, window: &CoomerWindow) {
     input::remove_overlay_monitor();
     DISPLAY_LINK.with(|c| {
@@ -335,7 +344,9 @@ define_class!(
             let fallback_delta_secs = (display_link.targetTimestamp() - display_link.timestamp())
                 .clamp(0.0, 0.25);
             let animating = with_session_mut(|st| {
-                step_overlay_animations(st, frame_timestamp, fallback_delta_secs)
+                let animating = step_overlay_animations(st, frame_timestamp, fallback_delta_secs);
+                hud::update_visibility(st.pointer_view, st.flashlight_radius, st.flashlight_progress);
+                animating
             })
             .unwrap_or(false);
             self.setNeedsDisplay(true);
@@ -367,9 +378,8 @@ fn ensure_display_link(view: &CoomerView) {
             return;
         }
 
-        let display_link = unsafe {
-            view.displayLinkWithTarget_selector(view, sel!(stepAnimation:))
-        };
+        let display_link =
+            unsafe { view.displayLinkWithTarget_selector(view, sel!(stepAnimation:)) };
         display_link.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
         unsafe {
             display_link.addToRunLoop_forMode(&NSRunLoop::currentRunLoop(), NSRunLoopCommonModes);
@@ -459,6 +469,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 with_session_mut(|st| {
                     start_flashlight_animation(st, !st.flashlight_enabled);
                 });
+                refresh_hud_visibility();
                 ensure_display_link(&self.view);
                 self.view.setNeedsDisplay(true);
                 IntentResult::Consume
@@ -468,6 +479,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     reset_state(st);
                     st.pointer_view = pointer_view;
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::Consume
             }
@@ -477,6 +489,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     let p = st.pointer_view;
                     zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::Consume
             }
@@ -486,6 +499,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     let p = st.pointer_view;
                     zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::Consume
             }
@@ -517,15 +531,10 @@ impl input::OverlayIntentSink for OverlayInputSink {
                         };
                         let new_zoom =
                             (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
-                        anchor_zoom_to_cursor(
-                            st,
-                            bounds,
-                            pointer_view.x,
-                            pointer_view.y,
-                            new_zoom,
-                        );
+                        anchor_zoom_to_cursor(st, bounds, pointer_view.x, pointer_view.y, new_zoom);
                     }
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::PassThrough
             }
@@ -534,6 +543,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     st.pointer_view = pointer_view;
                     st.drag_anchor_view = Some(pointer_view);
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::PassThrough
             }
@@ -551,6 +561,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     }
                     st.pointer_view = pointer_view;
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::PassThrough
             }
@@ -559,6 +570,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                     st.pointer_view = pointer_view;
                     st.drag_anchor_view = None;
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::PassThrough
             }
@@ -566,6 +578,7 @@ impl input::OverlayIntentSink for OverlayInputSink {
                 with_session_mut(|st| {
                     st.pointer_view = pointer_view;
                 });
+                refresh_hud_visibility();
                 self.view.setNeedsDisplay(true);
                 IntentResult::PassThrough
             }
