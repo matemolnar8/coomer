@@ -13,8 +13,8 @@ use std::cell::RefCell;
 mod config {
     pub(super) const ANIMATION_DELAY_SECS: f64 = 1.0;
     pub(super) const ANIMATION_DURATION_SECS: f64 = 0.6;
-    pub(super) const VISIBILITY_SLIDE_SECS: f64 = 0.16;
-    pub(super) const VISIBILITY_FADE_SECS: f64 = 0.12;
+    pub(super) const VISIBILITY_SLIDE_SECS: f64 = 0.3;
+    pub(super) const VISIBILITY_FADE_SECS: f64 = 0.3;
     pub(super) const FLASHLIGHT_OVERLAP_PADDING: f64 = 6.0;
     pub(super) const TOP_CORRIDOR_PADDING_X: f64 = 18.0;
     pub(super) const OFFSCREEN_GAP: f64 = 2.0;
@@ -163,8 +163,8 @@ fn presentation_frame(
     }
 }
 
-fn presentation_alpha(hidden: bool, reduce_motion: bool) -> f64 {
-    if reduce_motion && hidden { 0.0 } else { 1.0 }
+fn presentation_alpha(hidden: bool) -> f64 {
+    if hidden { 0.0 } else { 1.0 }
 }
 
 fn reduce_motion_enabled() -> bool {
@@ -371,8 +371,7 @@ fn apply_layout(bounds: NSRect, settled: bool) {
             hud.hidden,
             reduce_motion,
         ));
-        hud.glass
-            .setAlphaValue(presentation_alpha(hud.hidden, reduce_motion));
+        hud.glass.setAlphaValue(presentation_alpha(hud.hidden));
         let content_bounds = hud.glass.bounds();
         hud.content.setFrame(content_bounds);
 
@@ -431,7 +430,7 @@ pub(crate) fn update_visibility(
         Some((
             hud.glass.clone(),
             presentation_frame(bounds, home_frame, hidden, reduce_motion),
-            presentation_alpha(hidden, reduce_motion),
+            presentation_alpha(hidden),
             reduce_motion,
         ))
     }) else {
@@ -454,6 +453,7 @@ pub(crate) fn update_visibility(
             ctx.setDuration(config::VISIBILITY_SLIDE_SECS);
             ctx.setAllowsImplicitAnimation(true);
             glass.animator().setFrame(target);
+            glass.animator().setAlphaValue(alpha);
         });
         NSAnimationContext::runAnimationGroup(&changes);
     }
@@ -492,7 +492,7 @@ fn animate_to_settled() {
     });
     let layout = hud_layout(bounds, true, notch_top_offset);
     let glass_frame = presentation_frame(bounds, layout.glass_frame, hidden, reduce_motion);
-    let glass_alpha = presentation_alpha(hidden, reduce_motion);
+    let glass_alpha = presentation_alpha(hidden);
     title.setHidden(false);
     title.setAlphaValue(1.0);
 
