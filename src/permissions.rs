@@ -9,10 +9,6 @@ pub fn ensure_screen_capture_access(mtm: MainThreadMarker, app: &NSApplication) 
     if access.preflight() {
         return;
     }
-    access.request();
-    if access.preflight() {
-        return;
-    }
 
     #[allow(deprecated)]
     {
@@ -22,13 +18,20 @@ pub fn ensure_screen_capture_access(mtm: MainThreadMarker, app: &NSApplication) 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str("Screen Recording required"));
     alert.setInformativeText(&NSString::from_str(
-        "If you chose Don’t Allow in the system prompt, enable Screen Recording for this app in \
-         System Settings → Privacy & Security → Screen Recording, then launch coomer again.",
+        "Coomer will now request screen recording permission. If you chose Deny in the system prompt, enable Screen Recording for this app in \
+         System Settings → Privacy & Security → Screen Recording.",
     ));
     alert.setAlertStyle(NSAlertStyle::Warning);
     alert.addButtonWithTitle(&NSString::from_str("OK"));
 
     let _ = alert.runModal();
+
+    if access.request() {
+        return;
+    }
+
+    println!("Screen Recording permission not granted");
+
     cleanup_pidfile();
     std::process::exit(0);
 }
