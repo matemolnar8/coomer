@@ -1,7 +1,6 @@
 # coomer
 
-macOS agent: frozen full-screen capture of the display under the cursor, with zoom, panning while zoomed, and a toggleable flashlight overlay. 
-Intended to show up in screen shares because it draws its own fullscreen window instead of using Accessibility zoom.
+A full-screen zoom overlay for macOS screen shares. Freezes the display under your pointer, then lets you zoom, pan, and spotlight with a toggleable flashlight. Renders as a normal window so meeting apps capture it, unlike macOS Accessibility Zoom.
 
 Inspired by [boomer](https://github.com/tsoding/boomer), the Linux zoomer by Tsoding.
 
