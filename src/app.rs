@@ -1,7 +1,8 @@
 use crate::capture;
 use crate::input;
-use crate::overlay::{self, DrawState, OverlayInputSink};
+use crate::overlay::{self, OverlayInputSink};
 use crate::permissions;
+use crate::session::OverlaySession;
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 use std::path::PathBuf;
@@ -52,33 +53,12 @@ pub fn run() -> Result<(), String> {
 
     let cap = capture::capture_under_cursor(mtm)?;
     let mouse = objc2_app_kit::NSEvent::mouseLocation();
-
-    overlay::set_session(DrawState {
-        image: cap.cg_image,
-        zoom: overlay::DEFAULT_ZOOM,
-        pointer_view: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
-        image_origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
-        drag_anchor_view: None,
-        last_frame_timestamp: None,
-        flashlight_enabled: false,
-        flashlight_progress: 0.0,
-        flashlight_radius: overlay::DEFAULT_FLASHLIGHT_RADIUS,
-        flashlight_animation_from: 0.0,
-        flashlight_animation_elapsed_secs: 0.0,
-        flashlight_animating: false,
-        fade_in_progress: 0.0,
-        fade_in_elapsed_secs: 0.0,
-        fade_in_animating: true,
-    });
-
     let (window, view) = overlay::spawn_window(mtm, &cap.screen, cap.window_frame)?;
 
     {
         let wp = window.convertPointFromScreen(mouse);
         let vp = view.convertPoint_fromView(wp, None);
-        overlay::with_session_mut(|st| {
-            st.pointer_view = vp;
-        });
+        overlay::start_session(OverlaySession::new(cap.cg_image, vp));
         overlay::refresh_hud_visibility();
     }
 
