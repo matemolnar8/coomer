@@ -1,4 +1,3 @@
-use core_graphics::image::CGImage;
 use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2::{MainThreadOnly, define_class, msg_send, sel};
@@ -12,63 +11,16 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSRunLoop, NSRunLoopCo
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use std::cell::RefCell;
 
+use crate::session::{OverlaySession, SessionOutcome};
 use crate::{hud, input, render};
 
-mod config {
-    pub(super) mod zoom {
-        pub const DEFAULT: f64 = 1.0;
-        pub const MIN: f64 = 1.0;
-        pub const MAX: f64 = 4.0;
-        pub const SCROLL_FACTOR_PRECISE: f64 = 0.004;
-        pub const SCROLL_FACTOR_LINE: f64 = 0.07;
-        pub const KEYBOARD_MULTIPLIER: f64 = 1.08;
-        pub const EPSILON: f64 = 1e-9;
-    }
-
-    pub(super) mod flashlight {
-        pub const DEFAULT_RADIUS: f64 = 144.0;
-        pub const MIN_RADIUS: f64 = 24.0;
-        pub const MAX_RADIUS: f64 = 320.0;
-        pub const SCROLL_FACTOR_PRECISE: f64 = 2.5;
-        pub const SCROLL_FACTOR_LINE: f64 = 12.0;
-        pub const TOGGLE_DURATION_SECS: f64 = 0.18;
-    }
-
-    pub(super) mod fade_in {
-        pub const DURATION_SECS: f64 = 0.8;
-    }
-}
-
-pub const DEFAULT_ZOOM: f64 = config::zoom::DEFAULT;
-pub const DEFAULT_FLASHLIGHT_RADIUS: f64 = config::flashlight::DEFAULT_RADIUS;
-
-pub struct DrawState {
-    pub image: CGImage,
-    pub zoom: f64,
-    pub pointer_view: NSPoint,
-    pub image_origin: NSPoint,
-    pub drag_anchor_view: Option<NSPoint>,
-    pub last_frame_timestamp: Option<f64>,
-
-    pub fade_in_progress: f64,
-    pub fade_in_elapsed_secs: f64,
-    pub fade_in_animating: bool,
-
-    pub flashlight_enabled: bool,
-    pub flashlight_progress: f64,
-    pub flashlight_radius: f64,
-    pub flashlight_animation_from: f64,
-    pub flashlight_animation_elapsed_secs: f64,
-    pub flashlight_animating: bool,
-}
-
 thread_local! {
-    static SESSION: RefCell<Option<DrawState>> = const { RefCell::new(None) };
+    static SESSION: RefCell<Option<OverlaySession>> = const { RefCell::new(None) };
 }
 
-pub fn set_session(state: DrawState) {
+pub fn start_session(session: OverlaySession) {
     SESSION.with(|c| {
-        *c.borrow_mut() = Some(state);
+        *c.borrow_mut() = Some(session);
     });
 }
 
@@ -78,174 +30,21 @@ pub fn clear_session() {
     });
 }
 
-pub fn with_session_mut<R>(f: impl FnOnce(&mut DrawState) -> R) -> Option<R> {
+fn with_session<R>(f: impl FnOnce(&OverlaySession) -> R) -> Option<R> {
+    SESSION.with(|c| c.borrow().as_ref().map(f))
+}
+
+fn with_session_mut<R>(f: impl FnOnce(&mut OverlaySession) -> R) -> Option<R> {
     SESSION.with(|c| c.borrow_mut().as_mut().map(f))
 }
 
-fn flashlight_target_progress(st: &DrawState) -> f64 {
-    if st.flashlight_enabled { 1.0 } else { 0.0 }
-}
-
-fn ease_in_out(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn advance_animation(elapsed_secs: &mut f64, duration_secs: f64, frame_delta_secs: f64) -> f64 {
-    *elapsed_secs = (*elapsed_secs + frame_delta_secs).min(duration_secs);
-    (*elapsed_secs / duration_secs).clamp(0.0, 1.0)
-}
-
-fn update_flashlight_animation(st: &mut DrawState, frame_delta_secs: f64) -> bool {
-    if !st.flashlight_animating {
-        return false;
-    }
-
-    let target = flashlight_target_progress(st);
-    let t = advance_animation(
-        &mut st.flashlight_animation_elapsed_secs,
-        config::flashlight::TOGGLE_DURATION_SECS,
-        frame_delta_secs,
-    );
-    st.flashlight_progress =
-        st.flashlight_animation_from + (target - st.flashlight_animation_from) * ease_in_out(t);
-
-    if t >= 1.0 {
-        st.flashlight_progress = target;
-        st.flashlight_animation_elapsed_secs = 0.0;
-        st.flashlight_animating = false;
-        return false;
-    }
-
-    true
-}
-
-fn update_fade_in_animation(st: &mut DrawState, frame_delta_secs: f64) -> bool {
-    if !st.fade_in_animating {
-        return false;
-    }
-
-    let t = advance_animation(
-        &mut st.fade_in_elapsed_secs,
-        config::fade_in::DURATION_SECS,
-        frame_delta_secs,
-    );
-    st.fade_in_progress = ease_in_out(t);
-
-    if t >= 1.0 {
-        st.fade_in_progress = 1.0;
-        st.fade_in_elapsed_secs = 0.0;
-        st.fade_in_animating = false;
-        return false;
-    }
-
-    true
-}
-
-fn step_overlay_animations(
-    st: &mut DrawState,
-    frame_timestamp: f64,
-    fallback_delta_secs: f64,
-) -> bool {
-    let frame_delta_secs = st
-        .last_frame_timestamp
-        .map(|prev| frame_timestamp - prev)
-        .unwrap_or(fallback_delta_secs)
-        .clamp(0.0, 0.25);
-    st.last_frame_timestamp = Some(frame_timestamp);
-
-    let animating_flashlight = update_flashlight_animation(st, frame_delta_secs);
-    let animating_fade_in = update_fade_in_animation(st, frame_delta_secs);
-    animating_flashlight || animating_fade_in
-}
-
-fn start_flashlight_animation(st: &mut DrawState, enabled: bool) {
-    st.flashlight_enabled = enabled;
-    st.flashlight_animation_from = st.flashlight_progress;
-    st.flashlight_animation_elapsed_secs = 0.0;
-    st.flashlight_animating = true;
-    st.last_frame_timestamp = None;
-}
-
-fn reset_state(st: &mut DrawState) {
-    st.zoom = DEFAULT_ZOOM;
-    st.pointer_view = NSPoint { x: 0.0, y: 0.0 };
-    st.image_origin = NSPoint { x: 0.0, y: 0.0 };
-    st.drag_anchor_view = None;
-    st.flashlight_enabled = false;
-    st.flashlight_progress = 0.0;
-    st.flashlight_radius = DEFAULT_FLASHLIGHT_RADIUS;
-    st.flashlight_animation_from = 0.0;
-    st.flashlight_animation_elapsed_secs = 0.0;
-    st.flashlight_animating = false;
-}
-
-fn clamp_image_origin(origin: NSPoint, bounds: NSRect, zoom: f64) -> NSPoint {
-    let z = zoom.clamp(config::zoom::MIN, config::zoom::MAX);
-    if z <= 1.0 + config::zoom::EPSILON {
-        return NSPoint { x: 0.0, y: 0.0 };
-    }
-    let w = bounds.size.width;
-    let h = bounds.size.height;
-    let sw = w * z;
-    let sh = h * z;
-    let min_ox = w - sw;
-    let min_oy = h - sh;
-    NSPoint {
-        x: origin.x.clamp(min_ox, 0.0),
-        y: origin.y.clamp(min_oy, 0.0),
-    }
-}
-
-fn anchor_zoom_to_cursor(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, new_zoom: f64) {
-    let new_zoom = new_zoom.clamp(config::zoom::MIN, config::zoom::MAX);
-    if new_zoom <= 1.0 + config::zoom::EPSILON {
-        st.zoom = config::zoom::MIN;
-        st.image_origin = NSPoint { x: 0.0, y: 0.0 };
-        return;
-    }
-    let z0 = st.zoom;
-    if z0 <= 1.0 + config::zoom::EPSILON {
-        st.image_origin = NSPoint {
-            x: px * (1.0 - new_zoom),
-            y: py * (1.0 - new_zoom),
-        };
-        st.zoom = new_zoom;
-        st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
-        return;
-    }
-    let ratio = new_zoom / z0;
-    st.image_origin = NSPoint {
-        x: px - (px - st.image_origin.x) * ratio,
-        y: py - (py - st.image_origin.y) * ratio,
-    };
-    st.zoom = new_zoom;
-    st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
-}
-
-fn zoom_keyboard_anchored(st: &mut DrawState, bounds: NSRect, px: f64, py: f64, direction: i32) {
-    let factor = if direction > 0 {
-        config::zoom::KEYBOARD_MULTIPLIER
-    } else {
-        1.0 / config::zoom::KEYBOARD_MULTIPLIER
-    };
-    let new_zoom = (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
-    anchor_zoom_to_cursor(st, bounds, px, py, new_zoom);
-}
-
-fn point_delta(from: NSPoint, to: NSPoint) -> NSPoint {
-    NSPoint {
-        x: to.x - from.x,
-        y: to.y - from.y,
-    }
-}
-
 pub(crate) fn refresh_hud_visibility() {
-    let _ = with_session_mut(|st| {
+    let _ = with_session(|session| {
+        let snapshot = session.hud_snapshot();
         hud::update_visibility(
-            st.pointer_view,
-            st.flashlight_radius,
-            st.flashlight_progress,
+            snapshot.pointer_view,
+            snapshot.flashlight_radius,
+            snapshot.flashlight_progress,
         );
     });
 }
@@ -307,7 +106,7 @@ define_class!(
         fn draw_rect(&self, _rect: NSRect) {
             SESSION.with(|c| {
                 let b = c.borrow();
-                let Some(st) = b.as_ref() else {
+                let Some(session) = b.as_ref() else {
                     return;
                 };
                 let Some(ns_ctx) = NSGraphicsContext::currentContext() else {
@@ -315,25 +114,25 @@ define_class!(
                 };
                 let bounds = self.bounds();
                 let cg_ctx = ns_ctx.CGContext();
-                let zoom = st.zoom.clamp(config::zoom::MIN, config::zoom::MAX);
+                let snapshot = session.render_snapshot();
                 let pointer = CGPoint {
-                    x: st.pointer_view.x as _,
-                    y: st.pointer_view.y as _,
+                    x: snapshot.pointer_view.x as _,
+                    y: snapshot.pointer_view.y as _,
                 };
                 let image_origin = CGPoint {
-                    x: st.image_origin.x as _,
-                    y: st.image_origin.y as _,
+                    x: snapshot.image_origin.x as _,
+                    y: snapshot.image_origin.y as _,
                 };
                 render::draw_session(
                     &cg_ctx,
                     bounds,
-                    &st.image,
-                    zoom,
+                    snapshot.image,
+                    snapshot.zoom,
                     pointer,
                     image_origin,
-                    st.flashlight_progress,
-                    st.flashlight_radius,
-                    st.fade_in_progress,
+                    snapshot.flashlight_progress,
+                    snapshot.flashlight_radius,
+                    snapshot.fade_in_progress,
                 );
             });
         }
@@ -343,9 +142,14 @@ define_class!(
             let frame_timestamp = display_link.targetTimestamp();
             let fallback_delta_secs = (display_link.targetTimestamp() - display_link.timestamp())
                 .clamp(0.0, 0.25);
-            let animating = with_session_mut(|st| {
-                let animating = step_overlay_animations(st, frame_timestamp, fallback_delta_secs);
-                hud::update_visibility(st.pointer_view, st.flashlight_radius, st.flashlight_progress);
+            let animating = with_session_mut(|session| {
+                let animating = session.step_animation(frame_timestamp, fallback_delta_secs);
+                let snapshot = session.hud_snapshot();
+                hud::update_visibility(
+                    snapshot.pointer_view,
+                    snapshot.flashlight_radius,
+                    snapshot.flashlight_progress,
+                );
                 animating
             })
             .unwrap_or(false);
@@ -455,133 +259,30 @@ impl OverlayInputSink {
     ) -> Self {
         Self { mtm, window, view }
     }
+
+    fn apply_outcome(&self, outcome: SessionOutcome) -> input::IntentResult {
+        if outcome.quit {
+            stop_overlay(self.mtm, &self.window);
+            return input::IntentResult::StopOverlay;
+        }
+
+        if outcome.needs_animation {
+            ensure_display_link(&self.view);
+        }
+        if outcome.needs_redraw {
+            refresh_hud_visibility();
+            self.view.setNeedsDisplay(true);
+        }
+
+        outcome.intent_result
+    }
 }
 
 impl input::OverlayIntentSink for OverlayInputSink {
     fn handle(&mut self, intent: input::OverlayIntent) -> input::IntentResult {
-        use input::{IntentResult, OverlayIntent};
-        match intent {
-            OverlayIntent::Quit => {
-                stop_overlay(self.mtm, &self.window);
-                IntentResult::StopOverlay
-            }
-            OverlayIntent::ToggleFlashlight => {
-                with_session_mut(|st| {
-                    start_flashlight_animation(st, !st.flashlight_enabled);
-                });
-                refresh_hud_visibility();
-                ensure_display_link(&self.view);
-                self.view.setNeedsDisplay(true);
-                IntentResult::Consume
-            }
-            OverlayIntent::Reset { pointer_view } => {
-                with_session_mut(|st| {
-                    reset_state(st);
-                    st.pointer_view = pointer_view;
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::Consume
-            }
-            OverlayIntent::ZoomIn => {
-                let bounds = self.view.bounds();
-                with_session_mut(|st| {
-                    let p = st.pointer_view;
-                    zoom_keyboard_anchored(st, bounds, p.x, p.y, 1);
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::Consume
-            }
-            OverlayIntent::ZoomOut => {
-                let bounds = self.view.bounds();
-                with_session_mut(|st| {
-                    let p = st.pointer_view;
-                    zoom_keyboard_anchored(st, bounds, p.x, p.y, -1);
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::Consume
-            }
-            OverlayIntent::ScrollWheel {
-                pointer_view,
-                dy,
-                precise,
-                command,
-            } => {
-                let bounds = self.view.bounds();
-                with_session_mut(|st| {
-                    st.pointer_view = pointer_view;
-                    if command && (st.flashlight_enabled || st.flashlight_progress > 0.0) {
-                        let k = if precise {
-                            config::flashlight::SCROLL_FACTOR_PRECISE
-                        } else {
-                            config::flashlight::SCROLL_FACTOR_LINE
-                        };
-                        st.flashlight_radius = (st.flashlight_radius + dy * k).clamp(
-                            config::flashlight::MIN_RADIUS,
-                            config::flashlight::MAX_RADIUS,
-                        );
-                    } else {
-                        let line_factor = 1.0 + dy * config::zoom::SCROLL_FACTOR_LINE;
-                        let factor = if precise {
-                            1.0 + dy * config::zoom::SCROLL_FACTOR_PRECISE
-                        } else {
-                            line_factor
-                        };
-                        let new_zoom =
-                            (st.zoom * factor).clamp(config::zoom::MIN, config::zoom::MAX);
-                        anchor_zoom_to_cursor(st, bounds, pointer_view.x, pointer_view.y, new_zoom);
-                    }
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::PassThrough
-            }
-            OverlayIntent::LeftMouseDown { pointer_view } => {
-                with_session_mut(|st| {
-                    st.pointer_view = pointer_view;
-                    st.drag_anchor_view = Some(pointer_view);
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::PassThrough
-            }
-            OverlayIntent::LeftMouseDragged { pointer_view } => {
-                let bounds = self.view.bounds();
-                with_session_mut(|st| {
-                    if let Some(anchor) = st.drag_anchor_view {
-                        if st.zoom > 1.0 + config::zoom::EPSILON {
-                            let d = point_delta(anchor, pointer_view);
-                            st.image_origin.x += d.x;
-                            st.image_origin.y += d.y;
-                            st.image_origin = clamp_image_origin(st.image_origin, bounds, st.zoom);
-                        }
-                        st.drag_anchor_view = Some(pointer_view);
-                    }
-                    st.pointer_view = pointer_view;
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::PassThrough
-            }
-            OverlayIntent::LeftMouseUp { pointer_view } => {
-                with_session_mut(|st| {
-                    st.pointer_view = pointer_view;
-                    st.drag_anchor_view = None;
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::PassThrough
-            }
-            OverlayIntent::PointerMoved { pointer_view } => {
-                with_session_mut(|st| {
-                    st.pointer_view = pointer_view;
-                });
-                refresh_hud_visibility();
-                self.view.setNeedsDisplay(true);
-                IntentResult::PassThrough
-            }
-        }
+        let bounds = self.view.bounds();
+        with_session_mut(|session| session.handle(intent, bounds))
+            .map(|outcome| self.apply_outcome(outcome))
+            .unwrap_or(input::IntentResult::PassThrough)
     }
 }

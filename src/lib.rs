@@ -16,6 +16,8 @@ mod overlay;
 mod permissions;
 #[cfg(target_os = "macos")]
 mod render;
+#[cfg(target_os = "macos")]
+mod session;
 
 #[cfg(target_os = "macos")]
 pub fn run() -> Result<(), String> {
