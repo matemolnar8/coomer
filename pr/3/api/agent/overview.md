@@ -53,9 +53,6 @@ The what (small):
 
 The branch deletes the 21 mattpocock skills and their `docs/agents/` output, rewrites `AGENTS.md`, installs `comprehende`, and ports vitadeck's `pages` skill for hosted PR reviews. A separate part fixes four clippy warnings in `src/`.
 
-Look for:
-- Manual step: GitHub Pages is off on `matemolnar8/coomer`. A published review URL returns 404 until Pages serves the `gh-pages` branch from `/`.
-
 ## Review concerns
 
 ### 01 AGENTS.md rewrite (`agents-md`)
