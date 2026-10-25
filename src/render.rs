@@ -1,8 +1,9 @@
-use core_graphics::image::CGImage as SysCgImage;
 use foreign_types::ForeignType;
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGContext, CGImage};
 use objc2_foundation::NSRect;
+
+use crate::session::RenderSnapshot;
 
 fn nsrect_to_cgrect(r: NSRect) -> CGRect {
     CGRect::new(
@@ -11,17 +12,16 @@ fn nsrect_to_cgrect(r: NSRect) -> CGRect {
     )
 }
 
-pub fn draw_session(
-    cg_ctx: &CGContext,
-    view_bounds: NSRect,
-    image: &SysCgImage,
-    zoom: f64,
-    pointer: CGPoint,
-    image_origin: CGPoint,
-    flashlight_progress: f64,
-    flashlight_radius: f64,
-    fade_in_progress: f64,
-) {
+pub fn draw_session(cg_ctx: &CGContext, view_bounds: NSRect, snapshot: &RenderSnapshot) {
+    let RenderSnapshot {
+        image,
+        zoom,
+        pointer_view: pointer,
+        image_origin,
+        flashlight_progress,
+        flashlight_radius,
+        fade_in_progress,
+    } = *snapshot;
     let bounds = nsrect_to_cgrect(view_bounds);
     let objc_img: &CGImage = unsafe { &*(ForeignType::as_ptr(image).cast::<CGImage>()) };
     let c = Some(cg_ctx);

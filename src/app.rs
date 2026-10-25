@@ -19,15 +19,15 @@ fn replace_running_instance() -> Result<(), String> {
     let pidfile = dir.join("pid");
     if pidfile.exists() {
         let txt = std::fs::read_to_string(&pidfile).unwrap_or_default();
-        if let Ok(pid) = txt.trim().parse::<libc::pid_t>() {
-            if pid > 0 {
-                let alive = unsafe { ::libc::kill(pid, 0) } == 0;
-                if alive {
-                    unsafe {
-                        ::libc::kill(pid, ::libc::SIGTERM);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(120));
+        if let Ok(pid) = txt.trim().parse::<libc::pid_t>()
+            && pid > 0
+        {
+            let alive = unsafe { ::libc::kill(pid, 0) } == 0;
+            if alive {
+                unsafe {
+                    ::libc::kill(pid, ::libc::SIGTERM);
                 }
+                std::thread::sleep(std::time::Duration::from_millis(120));
             }
         }
         let _ = std::fs::remove_file(&pidfile);

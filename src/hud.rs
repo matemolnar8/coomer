@@ -375,10 +375,10 @@ fn apply_layout(bounds: NSRect, settled: bool) {
         let content_bounds = hud.glass.bounds();
         hud.content.setFrame(content_bounds);
 
-        if let Some(icon) = &hud.icon {
-            if let Some(icon_frame) = layout.icon_frame {
-                icon.setFrame(icon_frame);
-            }
+        if let Some(icon) = &hud.icon
+            && let Some(icon_frame) = layout.icon_frame
+        {
+            icon.setFrame(icon_frame);
         }
 
         hud.hint.setFrame(layout.hint_frame);
@@ -505,10 +505,10 @@ fn animate_to_settled() {
 
         glass.animator().setFrame(glass_frame);
         glass.animator().setAlphaValue(glass_alpha);
-        if let Some(icon) = &icon {
-            if let Some(icon_frame) = layout.icon_frame {
-                icon.animator().setFrame(icon_frame);
-            }
+        if let Some(icon) = &icon
+            && let Some(icon_frame) = layout.icon_frame
+        {
+            icon.animator().setFrame(icon_frame);
         }
         hint.animator().setFrame(layout.hint_frame);
         title_for_layout.animator().setFrame(layout.title_frame);
