@@ -26,6 +26,7 @@ One launch is one **Overlay Session**. `app::run` terminates the previous sessio
 - `src/hud.rs` - HUD layout, notch offset, hide-when-obstructing, settle animation
 - `src/capture.rs` - **Display Capture**; `src/permissions.rs` - Screen Recording Permission flow
 - `packaging/Info.plist` + `scripts/package-app.sh` - **Dock-less Agent** bundle; `raycast/` - **Raycast Trigger**
+- `.agents/skills/` - `comprehende`, installed from `matemolnar8/comprehende` via the `skills` CLI (`skills-lock.json`); update with `npx skills update`, never by hand. `.claude/skills` symlinks here.
 
 ## Footguns
 
@@ -61,7 +62,7 @@ The common defect is a change that works on the path you tested and breaks anoth
 - Open a PR only when asked, or when requested feature work is ready under an approved plan.
 - Conventional titles, plain language: `fix(hud): hide pill when flashlight covers it`.
 - Body: the problem in a sentence or two, then how you fixed it, then which checks passed. End with the model and harness that did the work.
-- Review the diff with the `comprehende` skill (base is the merge-base with `main`, head is the branch tip) and link the review in the PR body.
+- Before opening a PR, review the diff with the `comprehende` skill (base is the merge-base with `main`, head is the branch tip).
 - Visual changes need before/after screenshots; motion needs a short video. Upload evidence to GitHub; do not commit PR-only images.
 - One request is one PR.
 

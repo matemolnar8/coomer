@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/matemolnar8/comprehende/src/schema/review.schema.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "size": {
+      "type": "string",
+      "enum": [
+        "trivial",
+        "small",
+        "medium",
+        "large",
+        "very-large"
+      ],
+      "description": "Human review burden of this change."
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "baseRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "headRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "range": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseSha": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Commit baseRef resolved to when this document was written. refresh diffs from it."
+        },
+        "headSha": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Commit headRef resolved to when this document was written. refresh diffs from it."
+        }
+      },
+      "required": [
+        "baseRef",
+        "headRef"
+      ],
+      "additionalProperties": false
+    },
+    "previous": {
+      "type": "string",
+      "minLength": 1,
+      "description": "File name of the review this one was refreshed from, in the same directory. refresh writes it; the UI compares the two."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short name of the whole change. Prefer a user-created title when it names this change."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short what of the whole change. Name the stories."
+    },
+    "why": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Generated why for the whole change, from tickets, issues, a request description, or a transcript. Cite sources with [text](source:id)."
+    },
+    "sources": {
+      "description": "Locators the skill read to write its prose. Ticket bodies, PR descriptions, and transcript text stay out. PR comment body is copied.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "lookFor": {
+      "description": "Whole-change and missing-work claims. Cite the source. Do not store a pass/fail.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "parts": {
+      "description": "One entry per independent story when groups use part. name matches group part. summary is that story's one-sentence what.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short name of the independent story. Same string as group part."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One sentence: what this independent story is."
+          }
+        },
+        "required": [
+          "name",
+          "summary"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Generated why this group exists. From a source when one applies, or that it enables later groups in the same story."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One sentence: what this group is."
+          },
+          "lookFor": {
+            "description": "Scannable bullets of what to inspect.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "dependsOn": {
+            "description": "Ids of earlier groups this one depends on. Same story only.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "part": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Short name of the independent story this group belongs to. Same name = same story. Different names could have been separate PRs."
+          },
+          "sources": {
+            "description": "Ids of document sources this group names, even when the prose does not cite them inline.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "suggestedOrder": {
+            "type": "number"
+          },
+          "hunkRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "description": "A git path (every live hunk of that file), a directory ending in / (every live hunk under it), or path@oldStart+newStart. A rename is old -> new@oldStart+newStart."
+            },
+            "description": "A path string covers every live hunk of that file. path@oldStart+newStart is one hunk. old -> new@oldStart+newStart is a renamed hunk."
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "why",
+          "summary",
+          "suggestedOrder",
+          "hunkRefs"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "version",
+    "size",
+    "source",
+    "title",
+    "summary",
+    "groups"
+  ],
+  "additionalProperties": false,
+  "title": "Comprehende ReviewDocument",
+  "description": "Interpretation only: title, groups, summaries, and hunk pointers.",
+  "$defs": {
+    "source": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ticket",
+            "pr",
+            "pr-comment",
+            "commit",
+            "transcript"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short name shown in the UI. Examples: #24, alice on PR #32, Cursor session · Aug 12."
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Omit for transcripts."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gist": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One or two sentences, written by the skill, saying why this source matters."
+        },
+        "part": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short name of the independent story this source belongs to. Same name as the groups in that story."
+        },
+        "author": {
+          "type": "string",
+          "minLength": 1,
+          "description": "pr-comment only."
+        },
+        "body": {
+          "type": "string",
+          "description": "pr-comment only. The comment, faithful."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "pr-comment only. Git path. With side and line, pins the comment to live git."
+        },
+        "side": {
+          "type": "string",
+          "enum": [
+            "old",
+            "new"
+          ],
+          "description": "pr-comment only. Git-shaped, not GitHub-shaped."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "pr-comment only. 1-based line on that side."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
