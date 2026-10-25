@@ -1,0 +1,1 @@
+{"path":".agents/skills/grill-me/SKILL.md","ref":"2c167c094b21500cfcbf4733064d83f6a69dc4f7","side":"old","content":"---\nname: grill-me\ndescription: A relentless interview to sharpen a plan or design.\ndisable-model-invocation: true\n---\n\nRun a `/grilling` session.\n","language":"markdown"}
