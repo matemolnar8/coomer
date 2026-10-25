@@ -6,7 +6,6 @@ use objc2_app_kit::{
     NSGraphicsContext, NSScreen, NSScreenSaverWindowLevel, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_core_foundation::CGPoint;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use std::cell::RefCell;
@@ -114,26 +113,7 @@ define_class!(
                 };
                 let bounds = self.bounds();
                 let cg_ctx = ns_ctx.CGContext();
-                let snapshot = session.render_snapshot();
-                let pointer = CGPoint {
-                    x: snapshot.pointer_view.x as _,
-                    y: snapshot.pointer_view.y as _,
-                };
-                let image_origin = CGPoint {
-                    x: snapshot.image_origin.x as _,
-                    y: snapshot.image_origin.y as _,
-                };
-                render::draw_session(
-                    &cg_ctx,
-                    bounds,
-                    snapshot.image,
-                    snapshot.zoom,
-                    pointer,
-                    image_origin,
-                    snapshot.flashlight_progress,
-                    snapshot.flashlight_radius,
-                    snapshot.fade_in_progress,
-                );
+                render::draw_session(&cg_ctx, bounds, &session.render_snapshot());
             });
         }
 
