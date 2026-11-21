@@ -1,11 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
   "skills": {
     "comprehende": {
       "source": "matemolnar8/comprehende",
       "sourceType": "github",
       "skillPath": "skills/comprehende/SKILL.md",
-      "computedHash": "0cfdf56d1ebf00db3dd8f9df1f0553043df15b095f093ae93a78c1c27541711c"
+      "computedHash": "057e3407af6b11ebfe07eb18fbb8474da097b1d467922f48196ef0faaae8fb28",
+      "commit": "2003fd3907eda8f8af07e131e55786e9e5953dc0"
     }
   }
 }
